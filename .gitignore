@@ -1,0 +1,64 @@
+# ========= Secrets =========
+.env
+.env.local
+.env.*.local
+*.secret
+*.pem
+*.key
+
+# ========= Dependencies =========
+node_modules/
+**/node_modules/
+
+# ========= Build outputs =========
+dist/
+build/
+*.tsbuildinfo
+desktop/src-tauri/target/
+desktop/src-tauri/gen/schemas/
+desktop/dist/
+
+# ========= Backend data & cache =========
+backend/.cache/
+backend/data/
+backend/dist/
+
+# Qdrant storage
+qdrant_storage/
+qdrant_data/
+
+# ========= SOP Data (QUAN TRỌNG - KHÔNG push data công ty!) =========
+data/
+!data/.gitkeep
+data/**/*
+!data/README.md
+
+# Manifest cho incremental index
+.ingest-manifest.json
+
+# ========= IDE =========
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ========= Logs =========
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+
+# ========= OS =========
+.DS_Store
+._*
+Desktop.ini
+
+# ========= Tauri bundles =========
+desktop/src-tauri/target/release/bundle/
+
+# ========= Icons (nếu dùng icon có bản quyền) =========
+# desktop/src-tauri/icons/*.png
+# desktop/src-tauri/icons/*.ico
+# desktop/src-tauri/icons/*.icns

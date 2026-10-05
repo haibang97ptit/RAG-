@@ -1,0 +1,65 @@
+# Production compose: Qdrant + Backend (từ GHCR)
+# Dùng trên Linux server, sau khi đã mount SMB share vào /mnt/sop-data
+
+version: "3.8"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    container_name: sop-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__LOG_LEVEL: INFO
+    networks:
+      - sop-net
+
+  backend:
+    # Thay <OWNER>/<REPO> bằng path GitHub thực của em
+    image: ghcr.io/${GITHUB_OWNER:-your-user}/${GITHUB_REPO:-sop-ai}/backend:latest
+    container_name: sop-backend
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    ports:
+      - "0.0.0.0:8000:8000"
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      QDRANT_URL: http://qdrant:6333
+      PORT: "8000"
+      COLLECTION_NAME: sop_documents
+      LLM_MODEL: openai/gpt-oss-120b
+      ROUTER_MODEL: openai/gpt-oss-20b
+      EMBED_MODEL: Xenova/multilingual-e5-base
+      CHUNK_SIZE: "3000"
+      CHUNK_OVERLAP: "300"
+      TOP_K: "20"
+      RERANK_TOP_K: "10"
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      CACHE_DIR: /app/.cache
+      DATA_DIR: /app/data
+    volumes:
+      # Model cache (ko muốn tải lại mỗi lần restart)
+      - backend_cache:/app/.cache
+      # Dữ liệu SOP đã sync từ SMB share về (xem scripts/sync-shared-folder.sh)
+      - /opt/sop-local-data:/app/data:ro
+      # Manifest cho incremental
+      - backend_manifest:/app
+    networks:
+      - sop-net
+
+networks:
+  sop-net:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+    driver: local
+  backend_cache:
+    driver: local
+  backend_manifest:
+    driver: local
