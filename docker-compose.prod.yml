@@ -20,7 +20,7 @@ services:
 
   backend:
     # Thay <OWNER>/<REPO> bằng path GitHub thực của em
-    image: ghcr.io/${GITHUB_OWNER:-your-user}/${GITHUB_REPO:-sop-ai}/backend:latest
+    image: ghcr.io/${GITHUB_OWNER:-haibang97ptit}/sop-ai-backend:latest
     container_name: sop-backend
     restart: unless-stopped
     depends_on:
