@@ -48,7 +48,7 @@ services:
       # Dữ liệu SOP đã sync từ SMB share về (xem scripts/sync-shared-folder.sh)
       - /opt/sop-local-data:/app/data:ro
       # Manifest cho incremental
-      - backend_manifest:/app
+      # - backend_manifest:/app
     networks:
       - sop-net
 
@@ -61,5 +61,5 @@ volumes:
     driver: local
   backend_cache:
     driver: local
-  backend_manifest:
-    driver: local
+  # backend_manifest:
+  #   driver: local
