@@ -36,15 +36,15 @@ jobs:
         shell: bash
         run: echo "VITE_BACKEND_URL=${{ github.event.inputs.backend_url }}" > .env
 
-      - name: Prepare icons (dùng icon default nếu chưa có)
+      - name: Generate icons from source.png
         working-directory: desktop
         shell: bash
         run: |
-          mkdir -p src-tauri/icons
-          if [ ! -f src-tauri/icons/icon.ico ]; then
-            curl -L -o src-tauri/icons/source.png https://raw.githubusercontent.com/tauri-apps/tauri/dev/examples/api/src-tauri/icons/icon.png
-            npx -y @tauri-apps/cli@2 icon ./src-tauri/icons/source.png
+          if [ ! -f src-tauri/icons/source.png ]; then
+            echo "::error::Thiếu file src-tauri/icons/source.png"
+            exit 1
           fi
+          npx -y @tauri-apps/cli@2 icon ./src-tauri/icons/source.png
 
       - name: Build Tauri
         working-directory: desktop
