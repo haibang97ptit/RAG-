@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "SOP Search Backend - Fastify + Qdrant + Groq",
   "type": "module",
- "scripts": {
+"scripts": {
   "dev": "tsx watch src/server.ts",
   "start": "npx tsx src/server.ts",
   "ingest": "npx tsx src/ingest.ts",
