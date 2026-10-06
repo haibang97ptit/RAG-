@@ -3,15 +3,15 @@
   "version": "1.0.0",
   "description": "SOP Search Backend - Fastify + Qdrant + Groq",
   "type": "module",
-  "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
-    "ingest": "tsx src/ingest.ts",
-    "ingest:reset": "tsx src/ingest.ts --reset",
-    "ingest:incremental": "tsx src/incrementalIngest.ts",
-    "build": "tsc",
-    "type-check": "tsc --noEmit"
-  },
+ "scripts": {
+  "dev": "tsx watch src/server.ts",
+  "start": "npx tsx src/server.ts",
+  "ingest": "npx tsx src/ingest.ts",
+  "ingest:reset": "npx tsx src/ingest.ts --reset",
+  "ingest:incremental": "npx tsx src/incrementalIngest.ts",
+  "build": "tsc",
+  "type-check": "tsc --noEmit"
+},
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@qdrant/js-client-rest": "^1.12.0",
