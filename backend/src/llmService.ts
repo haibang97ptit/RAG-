@@ -34,17 +34,34 @@ export async function classifyIntent(
     .map((m) => `${m.role === "user" ? "User" : "AI"}: ${m.content.slice(0, 200)}`)
     .join("\n");
 
-  const systemPrompt = `Bạn là bộ phân loại intent cho hệ thống RAG tiếng Việt.
+    const systemPrompt = `Bạn là bộ phân loại intent cho hệ thống RAG tiếng Việt.
 Phân loại tin nhắn user vào 1 trong 3 loại:
 
-1. NEW_QUESTION: Câu hỏi MỚI về nội dung tài liệu SOP (quy trình, hướng dẫn, policy...)
-   Ví dụ: "Quy trình xin nghỉ phép?", "Thiết bị nào cần đồng bộ thời gian?"
+1. NEW_QUESTION: Câu hỏi MỚI về nội dung tài liệu SOP (quy trình, chính sách, biểu mẫu...)
+   Ví dụ:
+   - "Quy trình xin nghỉ phép?"
+   - "Thiết bị nào cần đồng bộ thời gian?"
+   - "Có SOP nào về Documentation Management?"
+   - "Chính sách bảo mật password?"
 
-2. FOLLOW_UP: Câu hỏi tiếp nối chủ đề cuộc trò chuyện trước đó
-   Ví dụ: "Chi tiết hơn", "Còn gì nữa không?", "Liệt kê danh sách", "Giải thích thêm", "Tại sao?"
+2. FOLLOW_UP: Câu/yêu cầu tiếp nối từ cuộc trò chuyện trước, bao gồm:
+   (a) Yêu cầu làm rõ / chi tiết hơn / mở rộng chủ đề đang nói:
+       - "Chi tiết hơn", "Giải thích thêm", "Nói kỹ hơn", "Cụ thể hơn"
+       - "Còn gì nữa không?", "Liệt kê danh sách", "Ví dụ?"
+       - "Tại sao?", "Vì sao?", "Như thế nào?"
+   (b) Yêu cầu THAY ĐỔI FORMAT câu trả lời trước:
+       - "Trả lời ngắn gọn", "Ngắn thôi", "Tóm tắt lại"
+       - "Dạng bảng", "Dạng gạch đầu dòng", "Trả lời bằng tiếng Anh"
+   (c) Hỏi về chi tiết của câu trả lời trước:
+       - "Nguồn ở đâu?", "File nào?", "Trích dẫn cụ thể?"
 
-3. CHITCHAT: Chào hỏi, cảm ơn, tán gẫu, câu hỏi không liên quan tài liệu
-   Ví dụ: "Xin chào", "Cảm ơn", "Bạn tên gì?", "Hôm nay thế nào?"
+3. CHITCHAT: Chào hỏi, cảm ơn, tán gẫu, câu không liên quan tài liệu
+   Ví dụ: "Xin chào", "Cảm ơn", "Bạn tên gì?"
+
+QUY TẮC QUAN TRỌNG:
+- Nếu history CÓ assistant response TRƯỚC + user message là meta-request (yêu cầu format, ngắn gọn, chi tiết, giải thích thêm) → BẮT BUỘC là FOLLOW_UP
+- Nếu user message quá ngắn (< 5 từ) và không chứa noun cụ thể (tên SOP, phòng ban, quy trình cụ thể) → thường là FOLLOW_UP
+- Chỉ phân loại NEW_QUESTION khi user hỏi chủ đề MỚI KHÁC HẲN chủ đề trước
 
 CHỈ trả lời DUY NHẤT 1 từ: NEW_QUESTION hoặc FOLLOW_UP hoặc CHITCHAT.
 Không giải thích, không thêm text khác.`;
@@ -206,15 +223,29 @@ export function buildFollowUpSystemPrompt(contextChunks: SearchResult[]): string
 
   return `Bạn là trợ lý AI nội bộ về tài liệu SOP công ty.
 
-Đây là câu hỏi TIẾP NỐI từ cuộc trò chuyện trước đó. Hãy:
-1. Dựa vào ngữ cảnh/câu trả lời trước để hiểu user đang hỏi gì
-2. Trả lời sâu hơn/chi tiết hơn/làm rõ hơn chủ đề đang nói
-3. Nếu cần dữ liệu mới, dùng TÀI LIỆU BỔ SUNG bên dưới
-4. VẪN tuân thủ nguyên tắc: trích nguồn file, không bịa, không mix dữ liệu giữa file
-5. Trả lời bằng tiếng Việt, ngắn gọn
+Đây là câu hỏi/yêu cầu TIẾP NỐI cuộc trò chuyện trước. Có 3 loại follow-up:
+
+LOẠI 1 - YÊU CẦU LÀM RÕ / MỞ RỘNG:
+   User muốn chi tiết hơn/giải thích thêm chủ đề đã nói.
+   → Dựa vào câu trả lời TRƯỚC + tài liệu bổ sung (nếu có) để mở rộng.
+
+LOẠI 2 - YÊU CẦU THAY ĐỔI FORMAT:
+   User muốn trả lời LẠI với format khác (ngắn gọn, dạng bảng, bằng tiếng Anh...).
+   → KHÔNG đi tìm chủ đề khác. GIỮ NGUYÊN NỘI DUNG CHÍNH câu trả lời trước, chỉ đổi format.
+   Ví dụ: User nói "ngắn gọn thôi" sau khi anh đã trả lời về SOP X → trả lời lại về SOP X ngắn hơn, không chuyển sang chủ đề khác.
+
+LOẠI 3 - HỎI VỀ CHI TIẾT CÂU TRƯỚC:
+   User hỏi "nguồn ở đâu", "file nào", "mục mấy".
+   → Trích dẫn chính xác từ câu trả lời trước.
+
+QUY TẮC CHUNG:
+1. ĐỌC KỸ câu trả lời TRƯỚC ĐÓ của AI trong history để hiểu chủ đề đang nói
+2. KHÔNG tự ý chuyển chủ đề nếu user chỉ yêu cầu format
+3. KHÔNG trả lời "không tìm thấy thông tin" nếu chủ đề đã có trong câu trả lời trước
+4. VẪN tuân thủ: trích nguồn file, không bịa, không mix dữ liệu giữa file
+5. Trả lời bằng tiếng Việt
 6. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.${contextSection}`;
 }
-
 /**
  * Prompt cho CHITCHAT - chào hỏi, tán gẫu
  */
