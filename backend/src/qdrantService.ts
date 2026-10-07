@@ -65,14 +65,32 @@ export async function upsertPoints(points: PointToInsert[]): Promise<void> {
   if (points.length === 0) return;
 
   const c = getQdrantClient();
-  await c.upsert(config.collectionName, {
-    wait: true,
-    points: points.map((p) => ({
-      id: p.id,
-      vector: p.vector,
-      payload: p.payload as unknown as Record<string, unknown>,
-    })),
-  });
+
+  // Retry 3 lần với exponential backoff
+  let lastErr: Error | undefined;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await c.upsert(config.collectionName, {
+        wait: true,
+        points: points.map((p) => ({
+          id: p.id,
+          vector: p.vector,
+          payload: p.payload as unknown as Record<string, unknown>,
+        })),
+      });
+      return; // success
+    } catch (err) {
+      lastErr = err as Error;
+      if (attempt < 3) {
+        const waitMs = attempt * 2000; // 2s, 4s
+        console.warn(
+          `   ⚠️  Upsert thất bại lần ${attempt}: ${(err as Error).message}. Retry sau ${waitMs}ms...`
+        );
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 export async function deleteByFileName(fileName: string): Promise<number> {
