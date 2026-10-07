@@ -29,42 +29,53 @@ export async function classifyIntent(
   // Nếu không có history → chắc chắn là NEW_QUESTION
   if (history.length === 0) return "NEW_QUESTION";
 
+  const msg = userMessage.toLowerCase().trim();
+  const wordCount = msg.split(/\s+/).filter(Boolean).length;
+
+  // ======== HEURISTIC BYPASS (không cần LLM) ========
+  // Keywords meta-request: yêu cầu format, chi tiết hơn, tóm tắt...
+  const metaKeywords = /\b(ngắn gọn|ngắn thôi|ngắn hơn|chi tiết hơn|chi tiết|giải thích thêm|giải thích|tóm tắt|tóm lại|cụ thể hơn|cụ thể|rõ hơn|rõ ràng hơn|ví dụ|liệt kê|dạng bảng|bảng biểu|tiếng anh|english|nguồn|file nào|mục nào|phần nào|trích dẫn|tại sao|vì sao|còn gì|còn nữa|thêm nữa|tiếp đi|tiếp theo|nói kỹ hơn|làm rõ|mở rộng|tổng hợp)\b/i;
+
+  if (wordCount <= 12 && metaKeywords.test(msg)) {
+    return "FOLLOW_UP";
+  }
+
+  // Chitchat heuristic (câu rất ngắn + chào hỏi/cảm ơn)
+  const chitchatKeywords = /^(xin chào|chào|cảm ơn|thank|hello|hi|bye|tạm biệt|ok|oke|okey|yes|no|dạ|vâng|ừ)\b[\s\.\!]*$/i;
+  if (chitchatKeywords.test(msg)) {
+    return "CHITCHAT";
+  }
+
+  // Pronoun reference → thường follow-up ("nó", "cái đó", "cái này", "file đó"...)
+  const pronounRefs = /\b(nó|cái đó|cái này|cái ấy|file đó|file này|tài liệu đó|tài liệu này|SOP đó|SOP này|đây|đó|ở trên|phía trên|vừa rồi)\b/i;
+  if (wordCount <= 15 && pronounRefs.test(msg)) {
+    return "FOLLOW_UP";
+  }
+
+  // ======== LLM ROUTER FALLBACK ========
   const recentHistory = history.slice(-4);
   const historyText = recentHistory
     .map((m) => `${m.role === "user" ? "User" : "AI"}: ${m.content.slice(0, 200)}`)
     .join("\n");
 
-    const systemPrompt = `Bạn là bộ phân loại intent cho hệ thống RAG tiếng Việt.
+  const systemPrompt = `Bạn là bộ phân loại intent cho hệ thống RAG tiếng Việt.
 Phân loại tin nhắn user vào 1 trong 3 loại:
 
 1. NEW_QUESTION: Câu hỏi MỚI về nội dung tài liệu SOP (quy trình, chính sách, biểu mẫu...)
-   Ví dụ:
-   - "Quy trình xin nghỉ phép?"
-   - "Thiết bị nào cần đồng bộ thời gian?"
-   - "Có SOP nào về Documentation Management?"
-   - "Chính sách bảo mật password?"
+   Ví dụ: "Quy trình xin nghỉ phép?", "Có SOP nào về Documentation Management?"
 
-2. FOLLOW_UP: Câu/yêu cầu tiếp nối từ cuộc trò chuyện trước, bao gồm:
-   (a) Yêu cầu làm rõ / chi tiết hơn / mở rộng chủ đề đang nói:
-       - "Chi tiết hơn", "Giải thích thêm", "Nói kỹ hơn", "Cụ thể hơn"
-       - "Còn gì nữa không?", "Liệt kê danh sách", "Ví dụ?"
-       - "Tại sao?", "Vì sao?", "Như thế nào?"
-   (b) Yêu cầu THAY ĐỔI FORMAT câu trả lời trước:
-       - "Trả lời ngắn gọn", "Ngắn thôi", "Tóm tắt lại"
-       - "Dạng bảng", "Dạng gạch đầu dòng", "Trả lời bằng tiếng Anh"
-   (c) Hỏi về chi tiết của câu trả lời trước:
-       - "Nguồn ở đâu?", "File nào?", "Trích dẫn cụ thể?"
+2. FOLLOW_UP: Câu/yêu cầu tiếp nối, bao gồm:
+   (a) Yêu cầu làm rõ/chi tiết hơn: "Chi tiết hơn", "Giải thích thêm"
+   (b) Yêu cầu đổi format: "Ngắn gọn", "Dạng bảng", "Tiếng Anh"
+   (c) Hỏi chi tiết câu trước: "Nguồn ở đâu?", "File nào?"
 
-3. CHITCHAT: Chào hỏi, cảm ơn, tán gẫu, câu không liên quan tài liệu
-   Ví dụ: "Xin chào", "Cảm ơn", "Bạn tên gì?"
+3. CHITCHAT: Chào hỏi, cảm ơn
 
-QUY TẮC QUAN TRỌNG:
-- Nếu history CÓ assistant response TRƯỚC + user message là meta-request (yêu cầu format, ngắn gọn, chi tiết, giải thích thêm) → BẮT BUỘC là FOLLOW_UP
-- Nếu user message quá ngắn (< 5 từ) và không chứa noun cụ thể (tên SOP, phòng ban, quy trình cụ thể) → thường là FOLLOW_UP
-- Chỉ phân loại NEW_QUESTION khi user hỏi chủ đề MỚI KHÁC HẲN chủ đề trước
+QUY TẮC:
+- Nếu user yêu cầu format (ngắn/chi tiết/bảng...) và có history → BẮT BUỘC FOLLOW_UP
+- Chỉ phân loại NEW_QUESTION khi user hỏi chủ đề MỚI KHÁC HẲN
 
-CHỈ trả lời DUY NHẤT 1 từ: NEW_QUESTION hoặc FOLLOW_UP hoặc CHITCHAT.
-Không giải thích, không thêm text khác.`;
+CHỈ trả lời DUY NHẤT 1 từ: NEW_QUESTION hoặc FOLLOW_UP hoặc CHITCHAT.`;
 
   try {
     const response = await getGroq().chat.completions.create({
