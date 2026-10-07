@@ -14,7 +14,6 @@ const BATCH_SIZE = 32;
 
 function makePointId(filePath: string, chunkIndex: number, sheetName?: string): number {
   const key = `${filePath}::${sheetName || ""}::${chunkIndex}`;
-  // Simple hash → positive 32-bit int (Qdrant chấp nhận unsigned)
   let hash = 0;
   for (let i = 0; i < key.length; i++) {
     hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
@@ -112,6 +111,7 @@ async function ingest() {
       if (e.stack) {
         console.error(`   stack: ${e.stack.split("\n").slice(0, 5).join("\n")}`);
       }
+    }
   }
 
   const finalCount = await countPoints();
