@@ -104,8 +104,14 @@ async function ingest() {
       totalDocs += 1;
       console.log(`${progress} ✓ ${fileName} → ${fileChunks} chunks`);
     } catch (err) {
-      console.error(`${progress} ❌ ${fileName}: ${(err as Error).message}`);
-    }
+      const e = err as any;
+      console.error(`${progress} ❌ ${fileName}: ${e.message}`);
+      if (e.cause) {
+        console.error(`   cause: ${e.cause?.code || e.cause?.name || "?"} - ${e.cause?.message || "?"}`);
+      }
+      if (e.stack) {
+        console.error(`   stack: ${e.stack.split("\n").slice(0, 5).join("\n")}`);
+      }
   }
 
   const finalCount = await countPoints();

@@ -27,19 +27,33 @@ export async function embed(texts: string | string[]): Promise<number[][]> {
   const inputs = Array.isArray(texts) ? texts : [texts];
   const prefixed = inputs.map((t) => `passage: ${t}`);
 
-  const output = await embedder(prefixed, {
-    pooling: "mean",
-    normalize: true,
-  });
+  // Retry 3 lần
+  let lastErr: Error | undefined;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const output = await embedder!(prefixed, {
+        pooling: "mean",
+        normalize: true,
+      });
 
-  const dims = output.dims;
-  const data = Array.from(output.data as Float32Array);
-  const dim = dims[dims.length - 1];
-  const vectors: number[][] = [];
-  for (let i = 0; i < inputs.length; i++) {
-    vectors.push(data.slice(i * dim, (i + 1) * dim));
+      const dims = output.dims;
+      const data = Array.from(output.data as Float32Array);
+      const dim = dims[dims.length - 1];
+      const vectors: number[][] = [];
+      for (let i = 0; i < inputs.length; i++) {
+        vectors.push(data.slice(i * dim, (i + 1) * dim));
+      }
+      return vectors;
+    } catch (err) {
+      lastErr = err as Error;
+      if (attempt < 3) {
+        const waitMs = attempt * 2000;
+        console.warn(`   ⚠️  Embed thất bại lần ${attempt}: ${(err as Error).message}. Retry sau ${waitMs}ms...`);
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+    }
   }
-  return vectors;
+  throw lastErr;
 }
 
 export async function embedQuery(query: string): Promise<number[]> {
