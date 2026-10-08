@@ -8,9 +8,13 @@ import {
   countPoints,
   getCategories,
   listIndexedFiles,
+  type SearchResult,
 } from "./qdrantService.js";
 import {
   classifyIntent,
+  classifyComplexity,
+  expandQuery,
+  generateHypotheticalAnswer,
   rerankChunks,
   buildSOPSystemPrompt,
   buildFollowUpSystemPrompt,
@@ -45,12 +49,76 @@ interface QueryBody {
   history?: ChatMessage[];
 }
 
-// Giới hạn history gửi cho LLM = 10 turns = 20 messages
 const MAX_HISTORY_MESSAGES = 20;
+const MAX_UI_SOURCES = 5;
 
 function limitHistory(history: ChatMessage[]): ChatMessage[] {
   if (!history || history.length === 0) return [];
   return history.slice(-MAX_HISTORY_MESSAGES);
+}
+
+/**
+ * Pipeline retrieval nâng cao:
+ * - Query expansion → multiple variants
+ * - HyDE (hypothetical answer) → embed cùng query gốc
+ * - Search parallel cho từng variant
+ * - Union + dedupe
+ * - Rerank với topK adaptive
+ */
+async function enhancedRetrieve(
+  query: string,
+  complexity: "simple" | "complex"
+): Promise<{ reranked: SearchResult[]; stats: any }> {
+  const stats: any = {};
+
+  // 1. Chạy song song: expand + HyDE (vì cùng gọi gpt-oss-20b, không depend nhau)
+  const [variants, hypothetical] = await Promise.all([
+    expandQuery(query),
+    generateHypotheticalAnswer(query),
+  ]);
+  stats.variants = variants;
+  stats.hyde_length = hypothetical.length;
+
+  // 2. Primary search: HyDE boost (query + hypothetical answer)
+  const primaryText = hypothetical ? `${query}\n\n${hypothetical}` : query;
+  const primaryVec = await embedQuery(primaryText);
+  const primaryResults = await searchSimilar(primaryVec, config.topK);
+
+  const allResults: SearchResult[] = [];
+  const seen = new Set<string>();
+
+  const addResult = (r: SearchResult) => {
+    const key = `${r.fileName}::${r.text.slice(0, 60)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allResults.push(r);
+    }
+  };
+
+  for (const r of primaryResults) addResult(r);
+
+  // 3. Secondary search với các variant (topK/2 mỗi variant để tránh overload)
+  const secondaryK = Math.max(5, Math.floor(config.topK / 2));
+  await Promise.all(
+    variants.map(async (variant) => {
+      try {
+        const vec = await embedQuery(variant);
+        const results = await searchSimilar(vec, secondaryK);
+        for (const r of results) addResult(r);
+      } catch (err) {
+        fastify.log.warn(`Variant search failed: ${(err as Error).message}`);
+      }
+    })
+  );
+
+  stats.unique_candidates = allResults.length;
+
+  // 4. Rerank với topK adaptive theo complexity
+  const effectiveTopK = complexity === "complex" ? Math.min(15, allResults.length) : config.rerankTopK;
+  const reranked = await rerankChunks(query, allResults, effectiveTopK);
+  stats.reranked_count = reranked.length;
+
+  return { reranked, stats };
 }
 
 // Health check
@@ -78,7 +146,7 @@ fastify.get("/stats", async () => {
   };
 });
 
-// Non-streaming (JSON) endpoint - dùng cho test/debug
+// JSON endpoint (debug)
 fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
   const { query, history = [] } = request.body;
   if (!query || typeof query !== "string") {
@@ -93,18 +161,13 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
 
   if (intent === "CHITCHAT") {
     const sysPrompt = buildChitChatSystemPrompt();
-    const messages: ChatMessage[] = [
-      ...limitedHistory,
-      { role: "user", content: query },
-    ];
+    const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
       answer += delta;
     }
   } else {
-    // NEW_QUESTION hoặc FOLLOW_UP
-    const qvec = await embedQuery(query);
-    const topResults = await searchSimilar(qvec, config.topK);
-    const reranked = await rerankChunks(query, topResults, config.rerankTopK);
+    const complexity = classifyComplexity(query);
+    const { reranked } = await enhancedRetrieve(query, complexity);
 
     sources = reranked.map((r) => ({
       fileName: r.fileName,
@@ -113,15 +176,13 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
       score: r.score,
     }));
 
+    const useCoT = complexity === "complex";
     const sysPrompt =
       intent === "FOLLOW_UP"
         ? buildFollowUpSystemPrompt(reranked)
-        : buildSOPSystemPrompt(reranked);
+        : buildSOPSystemPrompt(reranked, useCoT);
 
-    const messages: ChatMessage[] = [
-      ...limitedHistory,
-      { role: "user", content: query },
-    ];
+    const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
       answer += delta;
     }
@@ -137,7 +198,6 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     return reply.code(400).send({ error: "Thiếu query" });
   }
 
-  // Manual CORS headers vì ta bypass Fastify's response thường
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -154,50 +214,56 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
 
   try {
     const limitedHistory = limitHistory(history);
-
-    // 1. Phân loại intent
     const intent: Intent = await classifyIntent(query, limitedHistory);
     send("intent", { intent });
 
     let sysPrompt: string;
-    let sources: any[] = [];
+    let uiSources: any[] = [];
 
     if (intent === "CHITCHAT") {
       sysPrompt = buildChitChatSystemPrompt();
       send("sources", { sources: [] });
     } else {
-      // 2. Retrieval: search top-K
-      const qvec = await embedQuery(query);
-      const topResults = await searchSimilar(qvec, config.topK);
+      // 1. Classify complexity
+      const complexity = classifyComplexity(query);
+      send("complexity", { complexity });
 
-      // 3. Rerank xuống top rerankTopK
-      const reranked = await rerankChunks(query, topResults, config.rerankTopK);
+      // 2. Enhanced retrieve (HyDE + Query Expansion + Rerank)
+      const { reranked, stats } = await enhancedRetrieve(query, complexity);
+      fastify.log.info({ query, complexity, ...stats }, "retrieval_stats");
 
-      sources = reranked.map((r) => ({
-        fileName: r.fileName,
-        category: r.category,
-        sheetName: r.sheetName,
-        score: Math.round(r.score * 1000) / 1000,
-      }));
-      send("sources", { sources });
+      // 3. Dedupe sources UI: top MAX_UI_SOURCES unique files
+      const seenFiles = new Set<string>();
+      for (const r of reranked) {
+        const key = `${r.fileName}::${r.sheetName || ""}`;
+        if (!seenFiles.has(key)) {
+          seenFiles.add(key);
+          uiSources.push({
+            fileName: r.fileName,
+            category: r.category,
+            sheetName: r.sheetName,
+            score: Math.round(r.score * 1000) / 1000,
+          });
+          if (uiSources.length >= MAX_UI_SOURCES) break;
+        }
+      }
+      send("sources", { sources: uiSources });
 
+      // 4. Build prompt (CoT khi complex, SOP vs FOLLOW_UP vs CHITCHAT)
+      const useCoT = complexity === "complex";
       sysPrompt =
         intent === "FOLLOW_UP"
           ? buildFollowUpSystemPrompt(reranked)
-          : buildSOPSystemPrompt(reranked);
+          : buildSOPSystemPrompt(reranked, useCoT);
     }
 
-    // 4. Stream LLM response
-    const messages: ChatMessage[] = [
-      ...limitedHistory,
-      { role: "user", content: query },
-    ];
-
+    // 5. Stream LLM response
+    const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
       send("chunk", { delta });
     }
 
-    send("done", { intent, sources });
+    send("done", { intent, sources: uiSources });
   } catch (err) {
     fastify.log.error(err);
     send("error", { message: (err as Error).message });
@@ -228,7 +294,9 @@ async function start() {
     console.log(`   🌊 Stream:  POST /query/stream (SSE)`);
     console.log(`\n   LLM main:    ${config.llmModel}`);
     console.log(`   LLM router:  ${config.routerModel}`);
-    console.log(`   Top-K:       ${config.topK} → rerank → ${config.rerankTopK}`);
+    console.log(`   Pipeline:    HyDE + Query Expansion + Adaptive Rerank + CoT`);
+    console.log(`   Top-K:       ${config.topK} → union variants → rerank (5-15 adaptive)`);
+    console.log(`   UI sources:  Max ${MAX_UI_SOURCES} unique files`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
