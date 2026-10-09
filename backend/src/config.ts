@@ -36,4 +36,5 @@ export const config = {
   adminToken: process.env.ADMIN_TOKEN || "",
   cacheDir: process.env.CACHE_DIR || "./.cache",
   dataDir: process.env.DATA_DIR || path.resolve(__dirname, "../../data"),
+  enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
 };

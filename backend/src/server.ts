@@ -71,7 +71,20 @@ async function enhancedRetrieve(
 ): Promise<{ reranked: SearchResult[]; stats: any }> {
   const stats: any = {};
 
-  // 1. Chạy song song: expand + HyDE (vì cùng gọi gpt-oss-20b, không depend nhau)
+  // ============== SIMPLE PIPELINE (khi flag off) ==============
+  if (!config.enhancedRetrieval) {
+    stats.mode = "simple";
+    const vec = await embedQuery(query);
+    const results = await searchSimilar(vec, config.topK);
+    const reranked = await rerankChunks(query, results, config.rerankTopK);
+    stats.unique_candidates = results.length;
+    stats.reranked_count = reranked.length;
+    return { reranked, stats };
+  }
+
+  // ============== ENHANCED PIPELINE (HyDE + Query Expansion) ==============
+  stats.mode = "enhanced";
+
   const [variants, hypothetical] = await Promise.all([
     expandQuery(query),
     generateHypotheticalAnswer(query),
@@ -79,14 +92,12 @@ async function enhancedRetrieve(
   stats.variants = variants;
   stats.hyde_length = hypothetical.length;
 
-  // 2. Primary search: HyDE boost (query + hypothetical answer)
   const primaryText = hypothetical ? `${query}\n\n${hypothetical}` : query;
   const primaryVec = await embedQuery(primaryText);
   const primaryResults = await searchSimilar(primaryVec, config.topK);
 
   const allResults: SearchResult[] = [];
   const seen = new Set<string>();
-
   const addResult = (r: SearchResult) => {
     const key = `${r.fileName}::${r.text.slice(0, 60)}`;
     if (!seen.has(key)) {
@@ -97,7 +108,6 @@ async function enhancedRetrieve(
 
   for (const r of primaryResults) addResult(r);
 
-  // 3. Secondary search với các variant (topK/2 mỗi variant để tránh overload)
   const secondaryK = Math.max(5, Math.floor(config.topK / 2));
   await Promise.all(
     variants.map(async (variant) => {
@@ -110,11 +120,9 @@ async function enhancedRetrieve(
       }
     })
   );
-
   stats.unique_candidates = allResults.length;
 
-  // 4. Rerank với topK adaptive theo complexity
-  const effectiveTopK = complexity === "complex" ? Math.min(15, allResults.length) : config.rerankTopK;
+  const effectiveTopK = complexity === "complex" ? Math.min(10, allResults.length) : config.rerankTopK;
   const reranked = await rerankChunks(query, allResults, effectiveTopK);
   stats.reranked_count = reranked.length;
 
@@ -176,7 +184,7 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
       score: r.score,
     }));
 
-    const useCoT = complexity === "complex";
+    const useCoT = config.enhancedRetrieval &&  complexity === "complex";
     const sysPrompt =
       intent === "FOLLOW_UP"
         ? buildFollowUpSystemPrompt(reranked)
@@ -294,8 +302,7 @@ async function start() {
     console.log(`   🌊 Stream:  POST /query/stream (SSE)`);
     console.log(`\n   LLM main:    ${config.llmModel}`);
     console.log(`   LLM router:  ${config.routerModel}`);
-    console.log(`   Pipeline:    HyDE + Query Expansion + Adaptive Rerank + CoT`);
-    console.log(`   Top-K:       ${config.topK} → union variants → rerank (5-15 adaptive)`);
+    console.log(`   Pipeline:    ${config.enhancedRetrieval ? "ENHANCED (HyDE + Expansion + Adaptive)" : "SIMPLE (basic retrieval)"}`);    console.log(`   Top-K:       ${config.topK} → union variants → rerank (5-15 adaptive)`);
     console.log(`   UI sources:  Max ${MAX_UI_SOURCES} unique files`);
   } catch (err) {
     fastify.log.error(err);
