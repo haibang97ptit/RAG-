@@ -16,6 +16,7 @@ interface Message {
 
 const BACKEND_URL =
   (import.meta as any).env?.VITE_BACKEND_URL || "http://localhost:8000";
+const API_TOKEN = (import.meta as any).env?.VITE_API_TOKEN || "";
 const SESSION_STORAGE_KEY = "sop_session_v2";
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
@@ -101,11 +102,17 @@ export default function App() {
     try {
       const response = await fetch(`${BACKEND_URL}/query/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+        },
         body: JSON.stringify({ query: text, history }),
         signal: abortRef.current.signal,
       });
 
+      if (response.status === 401) {
+        throw new Error("Server từ chối truy cập (401) - cần cập nhật app bản mới");
+      }
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`);
       }

@@ -70,6 +70,10 @@ function splitLargeTable(tableLines: string[], chunkSize: number): string[] {
   return chunks;
 }
 
+// Bảng (mã số, ngày tháng, dấu |) tốn nhiều token hơn văn xuôi trên cùng số ký tự:
+// đo với multilingual-e5-base, 1200 ký tự bảng ≈ 550 token (giới hạn 512), văn xuôi ≈ 300.
+const TABLE_CHUNK_RATIO = 0.75;
+
 function isTableLine(line: string): boolean {
   return line.trim().startsWith("|") && line.trim().endsWith("|");
 }
@@ -113,7 +117,10 @@ export function chunkText(text: string, options: ChunkOptions): string[] {
   for (const block of blocks) {
     if (block.type === "table") {
       flushTextBuffer();
-      const tableChunks = splitLargeTable(block.content, options.chunkSize);
+      const tableChunks = splitLargeTable(
+        block.content,
+        Math.floor(options.chunkSize * TABLE_CHUNK_RATIO)
+      );
       chunks.push(...tableChunks);
     } else {
       textBuffer += block.content.join("\n") + "\n";

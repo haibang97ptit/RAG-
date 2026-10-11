@@ -34,7 +34,8 @@ data/**/*
 !data/README.md
 
 # Manifest cho incremental index
-.ingest-manifest.json
+.ingest-manifest*.json
+.ingest-manifest*.json.tmp
 
 # ========= IDE =========
 .vscode/

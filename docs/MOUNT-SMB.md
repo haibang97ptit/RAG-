@@ -103,7 +103,7 @@ Thêm:
 */30 * * * * /opt/sop-ai/scripts/sync-shared-folder.sh >> /var/log/sop-sync.log 2>&1
 
 # Incremental ingest mỗi 2h, 15 phút sau sync
-15 */2 * * * cd /opt/sop-ai && docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T backend node dist/incrementalIngest.js >> /var/log/sop-ingest.log 2>&1
+15 */2 * * * cd /opt/sop-ai && docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T backend npm run ingest:incremental >> /var/log/sop-ingest.log 2>&1
 ```
 
 ## Troubleshooting

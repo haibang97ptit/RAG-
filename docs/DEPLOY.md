@@ -51,8 +51,15 @@ nano .env.prod
 GITHUB_OWNER=your-github-user
 GITHUB_REPO=sop-ai
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxx
-ADMIN_TOKEN=generate-a-strong-random-token
+API_TOKEN=            # openssl rand -hex 32 — bảo vệ /query, /query/stream
+ADMIN_TOKEN=          # openssl rand -hex 32 — bảo vệ /stats
 ```
+
+`API_TOKEN` phải trùng với secret `API_TOKEN` dùng khi build desktop app (xem
+[Auth](#auth)). Để trống thì backend **không** kiểm tra token cho `/query*`.
+
+Lưu ý: `CHUNK_SIZE`, `CHUNK_OVERLAP`, `DATA_DIR`... trong `.env.prod` không có tác dụng
+trên server — các giá trị đó được đặt cứng trong `docker-compose.prod.yml`.
 
 ## Bước 4: Mount SMB share + sync data
 
@@ -93,14 +100,27 @@ docker compose -f docker-compose.prod.yml logs -f backend
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend \
-  npm run ingest:reset
-```
-
-Hoặc dùng incremental (lần sau):
-```bash
-docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend \
   npm run ingest:incremental
 ```
+
+Dùng `ingest:incremental` cả cho lần đầu: collection trống thì nó index toàn bộ và ghi
+manifest, các lần sau chỉ xử lý file mới/đổi/xóa. (`ingest:reset` xóa sạch collection
+trước khi index — bot không có dữ liệu trong lúc chạy — và không ghi manifest.)
+
+Manifest nằm trên volume `backend_state` (`/app/state`), mỗi collection một file.
+
+**Chốt an toàn khi xóa:** incremental sẽ dừng (exit 1, không xóa gì) nếu thư mục data
+không có file nào, hoặc nếu số file cần gỡ khỏi vector DB ≥ 20 và vượt 30% số file đã
+index — thường là dấu hiệu SMB chưa mount / rsync lỗi. Nếu việc xóa là có chủ đích
+(vd dọn cả một thư mục phòng ban), chạy lại với `--force`:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend \
+  npm run ingest:incremental -- --force
+```
+
+File không đọc được (hỏng, đang bị khóa) sẽ báo ❌ trong log và được thử lại ở lần chạy
+sau. File không có text (PDF scan) bị bỏ qua kèm cảnh báo.
 
 Setup cronjob re-index mỗi 2h sau khi sync:
 ```bash
@@ -120,6 +140,22 @@ sudo ufw reload
 
 Tauri desktop app ở máy user sẽ gọi: `http://<server-ip>:8000`.
 
+### Auth
+
+- `/health`: luôn mở (Docker healthcheck).
+- `/query`, `/query/stream`: cần header `Authorization: Bearer <API_TOKEN>`.
+- `/stats`: cần `ADMIN_TOKEN` (nếu không đặt `ADMIN_TOKEN` thì dùng `API_TOKEN`).
+
+Desktop app gửi token lấy từ `VITE_API_TOKEN` lúc build. Workflow **Build Desktop App**
+đọc giá trị này từ repo secret `API_TOKEN` (Settings → Secrets and variables → Actions).
+Token nằm trong bản cài nên chỉ chặn được người ngoài không có app, không phân biệt
+từng user.
+
+Đổi token = build + phát lại MSI **trước**, đổi `API_TOKEN` trên server **sau**.
+
+Kết nối là HTTP thường nên token và nội dung đi dạng không mã hóa trong mạng nội bộ.
+Muốn mã hóa thì đặt reverse proxy có TLS (Caddy/nginx) trước port 8000.
+
 ## Bước 8: Auto-restart & update
 
 Image có `restart: unless-stopped` nên docker tự khởi động lại.
@@ -136,6 +172,67 @@ Hoặc dùng script sẵn:
 ```bash
 bash scripts/deploy-server.sh
 ```
+
+Chờ workflow **Build & Push Backend Image** chạy xong rồi mới deploy, để compose mới
+không chạy với image cũ.
+
+### Rollback
+
+Mỗi lần build, image có thêm tag `sha-<7 ký tự commit>`. Trước khi update, ghi lại bản
+đang chạy:
+
+```bash
+docker inspect sop-backend --format '{{.Config.Image}} {{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+Để quay lại, thêm vào `.env.prod` rồi `up -d`:
+```bash
+IMAGE_TAG=sha-xxxxxxx
+```
+
+## Index lại toàn bộ không gián đoạn (đổi chunk size, đổi cách đọc file)
+
+Chunk size, cách đọc Excel... chỉ áp dụng cho file được index sau khi đổi. Để áp dụng
+cho toàn bộ mà bot vẫn trả lời bình thường: index vào collection mới, xong mới chuyển.
+
+```bash
+cd /opt/sop-ai
+DC="docker compose -f docker-compose.prod.yml --env-file .env.prod"
+
+# 1. Tạm tắt cronjob ingest (crontab -e, comment dòng ingest:incremental)
+
+# 2. Index vào collection mới. Bản đang chạy vẫn phục vụ từ collection cũ.
+#    Chạy trong tmux/screen - embed bằng CPU có thể mất vài giờ.
+$DC exec -e COLLECTION_NAME=sop_documents_v2 backend npm run ingest:incremental
+
+# 3. So số chunk / kiểm tra log không còn ❌
+curl -s http://localhost:6333/collections/sop_documents_v2 | grep -o '"points_count":[0-9]*'
+
+# 4. Chuyển: thêm COLLECTION_NAME=sop_documents_v2 vào .env.prod rồi
+$DC up -d          # backend khởi động lại ~30-60s (load embedding model)
+
+# 5. Bật lại cronjob. Manifest của collection mới đã có sẵn từ bước 2.
+
+# 6. Khi đã ổn (vài ngày), xóa collection cũ
+curl -X DELETE http://localhost:6333/collections/sop_documents
+```
+
+Quay lại collection cũ: đổi `COLLECTION_NAME` về giá trị cũ rồi `$DC up -d`.
+
+## Nâng cấp từ bản chưa có auth / chunk 3000
+
+Thứ tự này để user đang dùng app bản cũ không bị gián đoạn:
+
+1. **Tắt cronjob ingest**, ghi lại image đang chạy (mục Rollback).
+2. **Deploy backend mới, chưa đặt `API_TOKEN`** (`bash scripts/deploy-server.sh`).
+   App bản cũ vẫn dùng được. Từ lúc này `/stats` cần `ADMIN_TOKEN` nếu biến đó đã có
+   trong `.env.prod`.
+3. **Index lại vào collection mới rồi chuyển** (mục trên).
+4. **Bật lại cronjob ingest.**
+5. Tạo token (`openssl rand -hex 32`), lưu thành repo secret `API_TOKEN`, chạy workflow
+   **Build Desktop App**, phát MSI mới cho user.
+6. Khi mọi máy đã cài bản mới: thêm `API_TOKEN=<token>` vào `.env.prod`, `up -d`.
+   Máy nào còn bản cũ sẽ báo "Lỗi kết nối: HTTP 401".
 
 ## Monitoring
 

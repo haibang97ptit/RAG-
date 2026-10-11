@@ -32,7 +32,8 @@ Hệ thống AI nội bộ hỏi đáp tài liệu SOP công ty (RAG). Tech stac
 - LLM-based reranker (search top-20 → rerank → top-10)
 - Conversation memory 24h client-side, gửi 10 turn gần nhất cho LLM
 - Strict attribution: không mix dữ liệu giữa file, luôn trích nguồn
-- Incremental index: chỉ re-index file mới/thay đổi
+- Incremental index: chỉ re-index file mới/thay đổi, tự gỡ file đã xóa (có chốt an toàn chống xóa nhầm hàng loạt)
+- Auth bằng token dùng chung (`API_TOKEN` cho `/query*`, `ADMIN_TOKEN` cho `/stats`) - xem [docs/DEPLOY.md](docs/DEPLOY.md#auth)
 - Desktop app: system tray, popup click, auto-hide on blur, 24h session
 
 ## Chạy local (dev)

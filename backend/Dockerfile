@@ -29,7 +29,7 @@ COPY tsconfig.json ./
 RUN groupadd --gid 1001 nodejs && \
     useradd --uid 1001 --gid nodejs --shell /bin/bash --create-home nodejs
 
-RUN mkdir -p /app/.cache /app/data && \
+RUN mkdir -p /app/.cache /app/data /app/state && \
     chown -R nodejs:nodejs /app
 
 USER nodejs

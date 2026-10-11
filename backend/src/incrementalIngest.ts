@@ -6,7 +6,8 @@ import { initEmbedder, embed } from "./embedding.js";
 import {
   ensureCollection,
   upsertPoints,
-  deleteByFileName,
+  deleteByFilePath,
+  listIndexedFilePaths,
   countPoints,
   type PointToInsert,
 } from "./qdrantService.js";
@@ -14,7 +15,13 @@ import { readFile, walkDirectory } from "./fileReaders.js";
 import { chunkText } from "./chunker.js";
 
 const BATCH_SIZE = 32;
-const MANIFEST_PATH = path.join(config.dataDir, "..", ".ingest-manifest.json");
+const MANIFEST_PATH = config.manifestPath;
+const SAVE_MANIFEST_EVERY = 20; // files
+
+// Chốt an toàn: nếu số file cần xóa vượt ngưỡng (vd SMB hỏng, rsync lỗi, DATA_DIR sai)
+// thì dừng, không xóa gì. Chạy lại với --force nếu việc xóa là có chủ đích.
+const MAX_DELETE_RATIO = 0.3;
+const MIN_DELETE_COUNT_FOR_GUARD = 20;
 
 interface FileRecord {
   filePath: string;
@@ -47,7 +54,11 @@ async function loadManifest(): Promise<Manifest> {
 
 async function saveManifest(manifest: Manifest): Promise<void> {
   manifest.lastRun = new Date().toISOString();
-  await fs.writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
+  await fs.mkdir(path.dirname(MANIFEST_PATH), { recursive: true });
+  // Ghi ra file tạm rồi rename để không để lại manifest hỏng nếu bị kill giữa chừng
+  const tmpPath = `${MANIFEST_PATH}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(manifest, null, 2));
+  await fs.rename(tmpPath, MANIFEST_PATH);
 }
 
 async function hashFile(filePath: string): Promise<{ hash: string; mtime: number; size: number }> {
@@ -65,26 +76,28 @@ function makePointId(filePath: string, chunkIndex: number, sheetName?: string): 
   return Math.abs(hash);
 }
 
+/**
+ * Index (hoặc index lại) 1 file. Parse + embed xong hết rồi mới xóa chunks cũ và upsert,
+ * nên file lỗi parse/embed không làm mất dữ liệu đang có.
+ */
 async function indexFile(filePath: string): Promise<number> {
   const docs = await readFile(filePath, config.dataDir);
-  if (docs.length === 0) return 0;
 
-  let totalChunks = 0;
+  const points: PointToInsert[] = [];
 
   for (const doc of docs) {
     const chunks = chunkText(doc.text, {
       chunkSize: config.chunkSize,
       chunkOverlap: config.chunkOverlap,
     });
-    if (chunks.length === 0) continue;
 
     for (let j = 0; j < chunks.length; j += BATCH_SIZE) {
       const batch = chunks.slice(j, j + BATCH_SIZE);
       const vectors = await embed(batch);
 
-      const points: PointToInsert[] = batch.map((text, k) => {
-        const globalIdx = totalChunks + j + k;
-        return {
+      batch.forEach((text, k) => {
+        const globalIdx = points.length;
+        points.push({
           id: makePointId(filePath, globalIdx, doc.metadata.sheetName),
           vector: vectors[k],
           payload: {
@@ -96,21 +109,26 @@ async function indexFile(filePath: string): Promise<number> {
             sheetName: doc.metadata.sheetName,
             chunkIndex: globalIdx,
           },
-        };
+        });
       });
-
-      await upsertPoints(points);
     }
-
-    totalChunks += chunks.length;
   }
 
-  return totalChunks;
+  await deleteByFilePath(filePath);
+  for (let j = 0; j < points.length; j += BATCH_SIZE) {
+    await upsertPoints(points.slice(j, j + BATCH_SIZE));
+  }
+
+  return points.length;
 }
 
 async function incrementalIngest() {
+  const force = process.argv.includes("--force");
+
   console.log("🔄 INCREMENTAL INGEST\n");
   console.log(`   Data dir:    ${config.dataDir}`);
+  console.log(`   Collection:  ${config.collectionName}`);
+  console.log(`   Chunk size:  ${config.chunkSize}`);
   console.log(`   Manifest:    ${MANIFEST_PATH}\n`);
 
   console.log("1️⃣  Load embedding model...");
@@ -120,6 +138,9 @@ async function incrementalIngest() {
   await ensureCollection(false);
 
   console.log("\n3️⃣  Load manifest...");
+  // Fail sớm nếu không ghi được manifest, thay vì index xong hàng giờ rồi mới lỗi lúc lưu
+  await fs.mkdir(path.dirname(MANIFEST_PATH), { recursive: true });
+  await fs.access(path.dirname(MANIFEST_PATH), fs.constants.W_OK);
   const manifest = await loadManifest();
   const previousCount = Object.keys(manifest.files).length;
   console.log(`   Previous: ${previousCount} files tracked`);
@@ -129,10 +150,21 @@ async function incrementalIngest() {
   const currentPaths = new Set(currentFiles);
   console.log(`   Current:  ${currentFiles.length} files on disk`);
 
+  // File đang có trong vector DB (kể cả file manifest không biết, vd manifest bị mất)
+  const indexedPaths = await listIndexedFilePaths();
+  console.log(`   Indexed:  ${indexedPaths.size} files in vector DB`);
+
+  const trackedPaths = new Set([...Object.keys(manifest.files), ...indexedPaths]);
+
+  if (currentFiles.length === 0 && trackedPaths.size > 0 && !force) {
+    throw new Error(
+      `Không thấy file nào trong ${config.dataDir} nhưng đang có ${trackedPaths.size} files đã index. ` +
+        `Có thể thư mục data chưa mount/sync. Không xóa gì. Chạy lại với --force nếu thật sự muốn xóa hết.`
+    );
+  }
+
   // Phân loại files
-  const toAdd: string[] = [];
-  const toUpdate: string[] = [];
-  const toDelete: string[] = [];
+  const toIndex: { filePath: string; isNew: boolean }[] = [];
   const unchanged: string[] = [];
 
   console.log("\n5️⃣  Diff files...");
@@ -141,84 +173,65 @@ async function incrementalIngest() {
     const { hash, mtime, size } = await hashFile(filePath);
 
     if (!prev) {
-      toAdd.push(filePath);
+      toIndex.push({ filePath, isNew: true });
     } else if (prev.hash !== hash || Math.abs(prev.mtime - mtime) > 1 || prev.size !== size) {
-      toUpdate.push(filePath);
+      toIndex.push({ filePath, isNew: false });
     } else {
       unchanged.push(filePath);
     }
   }
 
-  // Files bị xóa (có trong manifest nhưng ko có trên disk)
-  for (const filePath of Object.keys(manifest.files)) {
-    if (!currentPaths.has(filePath)) {
-      toDelete.push(filePath);
-    }
-  }
+  // Files bị xóa: có trong manifest hoặc vector DB nhưng ko còn trên disk
+  const toDelete = [...trackedPaths].filter((p) => !currentPaths.has(p));
 
-  console.log(`   ➕ Thêm mới:   ${toAdd.length}`);
-  console.log(`   🔄 Cập nhật:  ${toUpdate.length}`);
+  const addCount = toIndex.filter((f) => f.isNew).length;
+  console.log(`   ➕ Thêm mới:   ${addCount}`);
+  console.log(`   🔄 Cập nhật:  ${toIndex.length - addCount}`);
   console.log(`   ❌ Xóa:        ${toDelete.length}`);
   console.log(`   ✓  Giữ nguyên: ${unchanged.length}`);
 
-  if (toAdd.length + toUpdate.length + toDelete.length === 0) {
+  if (toIndex.length + toDelete.length === 0) {
     console.log("\n✅ Không có thay đổi. Thoát.");
     return;
   }
+
+  if (
+    !force &&
+    toDelete.length >= MIN_DELETE_COUNT_FOR_GUARD &&
+    toDelete.length / trackedPaths.size > MAX_DELETE_RATIO
+  ) {
+    throw new Error(
+      `Sắp xóa ${toDelete.length}/${trackedPaths.size} files đã index (> ${MAX_DELETE_RATIO * 100}%). ` +
+        `Dừng lại để tránh xóa nhầm (data chưa sync đủ? DATA_DIR khác lúc index?). ` +
+        `Nếu đúng là muốn xóa, chạy lại với --force.`
+    );
+  }
+
+  let failed = 0;
 
   // 6. Xử lý DELETE
   if (toDelete.length > 0) {
     console.log(`\n6️⃣  Xóa ${toDelete.length} files khỏi vector DB...`);
     for (const filePath of toDelete) {
-      const prev = manifest.files[filePath];
-      if (prev) {
-        await deleteByFileName(prev.fileName);
+      try {
+        await deleteByFilePath(filePath);
         delete manifest.files[filePath];
-        console.log(`   ❌ ${prev.fileName}`);
-      }
-    }
-  }
-
-  // 7. Xử lý UPDATE: delete trước rồi re-index
-  if (toUpdate.length > 0) {
-    console.log(`\n7️⃣  Cập nhật ${toUpdate.length} files...`);
-    for (let i = 0; i < toUpdate.length; i++) {
-      const filePath = toUpdate[i];
-      const fileName = path.basename(filePath);
-      const progress = `[${i + 1}/${toUpdate.length}]`;
-
-      try {
-        // Xóa chunks cũ
-        await deleteByFileName(fileName);
-
-        // Index lại
-        const chunksCount = await indexFile(filePath);
-        const { hash, mtime, size } = await hashFile(filePath);
-
-        manifest.files[filePath] = {
-          filePath,
-          fileName,
-          hash,
-          mtime,
-          size,
-          chunksCount,
-          indexedAt: new Date().toISOString(),
-        };
-
-        console.log(`${progress} 🔄 ${fileName} → ${chunksCount} chunks`);
+        console.log(`   ❌ ${path.basename(filePath)}`);
       } catch (err) {
-        console.error(`${progress} ❌ ${fileName}: ${(err as Error).message}`);
+        failed++;
+        console.error(`   ⚠️  Không xóa được ${filePath}: ${(err as Error).message}`);
       }
     }
+    await saveManifest(manifest);
   }
 
-  // 8. Xử lý ADD
-  if (toAdd.length > 0) {
-    console.log(`\n8️⃣  Thêm mới ${toAdd.length} files...`);
-    for (let i = 0; i < toAdd.length; i++) {
-      const filePath = toAdd[i];
+  // 7. Xử lý ADD + UPDATE (indexFile tự xóa chunks cũ của file trước khi upsert)
+  if (toIndex.length > 0) {
+    console.log(`\n7️⃣  Index ${toIndex.length} files...`);
+    for (let i = 0; i < toIndex.length; i++) {
+      const { filePath, isNew } = toIndex[i];
       const fileName = path.basename(filePath);
-      const progress = `[${i + 1}/${toAdd.length}]`;
+      const progress = `[${i + 1}/${toIndex.length}]`;
 
       try {
         const chunksCount = await indexFile(filePath);
@@ -234,23 +247,32 @@ async function incrementalIngest() {
           indexedAt: new Date().toISOString(),
         };
 
-        console.log(`${progress} ➕ ${fileName} → ${chunksCount} chunks`);
+        console.log(`${progress} ${isNew ? "➕" : "🔄"} ${fileName} → ${chunksCount} chunks`);
       } catch (err) {
+        // Không ghi vào manifest → lần chạy sau sẽ thử lại file này
+        failed++;
         console.error(`${progress} ❌ ${fileName}: ${(err as Error).message}`);
+      }
+
+      if ((i + 1) % SAVE_MANIFEST_EVERY === 0) {
+        await saveManifest(manifest);
       }
     }
   }
 
-  // 9. Save manifest
+  // 8. Save manifest
   await saveManifest(manifest);
 
   const finalCount = await countPoints();
   console.log(`\n✅ INCREMENTAL INGEST HOÀN TẤT`);
   console.log(`   Files in manifest: ${Object.keys(manifest.files).length}`);
   console.log(`   Total chunks DB:   ${finalCount}`);
+  if (failed > 0) {
+    console.log(`   ⚠️  Lỗi:            ${failed} files (sẽ thử lại ở lần chạy sau)`);
+  }
 }
 
 incrementalIngest().catch((err) => {
-  console.error("❌ Incremental ingest thất bại:", err);
+  console.error("❌ Incremental ingest thất bại:", (err as Error).message || err);
   process.exit(1);
 });

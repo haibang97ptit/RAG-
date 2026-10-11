@@ -58,7 +58,7 @@ async function ingest() {
     try {
       const docs = await readFile(filePath, config.dataDir);
       if (docs.length === 0) {
-        console.log(`${progress} ⏭️  ${fileName} (skip - không parse được)`);
+        console.log(`${progress} ⏭️  ${fileName} (skip - không có nội dung)`);
         continue;
       }
 

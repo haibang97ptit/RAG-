@@ -42,8 +42,14 @@ fi
 
 echo ""
 echo "📊 Stats:"
-curl -fsS http://localhost:8000/stats | head -c 500 && echo ""
+# /stats cần ADMIN_TOKEN (hoặc API_TOKEN nếu không đặt ADMIN_TOKEN)
+env_value() { grep -E "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | tr -d '\r"' || true; }
+STATS_TOKEN="$(env_value ADMIN_TOKEN)"
+[[ -z "$STATS_TOKEN" ]] && STATS_TOKEN="$(env_value API_TOKEN)"
+curl -fsS -H "Authorization: Bearer $STATS_TOKEN" http://localhost:8000/stats | head -c 500 \
+    || echo "⚠️  Không lấy được /stats (không ảnh hưởng deploy)"
+echo ""
 
 echo ""
 echo "✅ Deploy xong. Nếu đây là lần đầu, chạy ingest:"
-echo "   docker compose -f $COMPOSE_FILE --env-file $ENV_FILE exec backend npm run ingest:reset"
+echo "   docker compose -f $COMPOSE_FILE --env-file $ENV_FILE exec backend npm run ingest:incremental"

@@ -33,17 +33,20 @@ export async function ensureCollection(reset: boolean = false): Promise<void> {
       },
     });
 
-    // Payload index cho fileName để delete nhanh (dùng cho incremental)
+    console.log(`   ✓ Created collection '${collectionName}'`);
+  }
+
+  // Payload index để delete theo file nhanh (dùng cho incremental).
+  // Chạy cả với collection đã có sẵn - tạo lại index đã tồn tại là no-op.
+  for (const field of ["fileName", "filePath"]) {
     try {
       await c.createPayloadIndex(collectionName, {
-        field_name: "fileName",
+        field_name: field,
         field_schema: "keyword",
       });
     } catch (err) {
-      console.warn("Could not create fileName index:", (err as Error).message);
+      console.warn(`Could not create ${field} index:`, (err as Error).message);
     }
-
-    console.log(`   ✓ Created collection '${collectionName}' with fileName index`);
   }
 }
 
@@ -93,48 +96,60 @@ export async function upsertPoints(points: PointToInsert[]): Promise<void> {
   throw lastErr;
 }
 
-export async function deleteByFileName(fileName: string): Promise<number> {
+// Xóa theo filePath (không phải fileName) vì 2 phòng ban có thể có file trùng tên.
+// Throw khi lỗi để caller không ghi nhận nhầm là đã xóa.
+export async function deleteByFilePath(filePath: string): Promise<void> {
   const c = getQdrantClient();
-  try {
-    const result = await c.delete(config.collectionName, {
-      wait: true,
-      filter: {
-        must: [
-          { key: "fileName", match: { value: fileName } },
-        ],
-      },
+  await c.delete(config.collectionName, {
+    wait: true,
+    filter: {
+      must: [
+        { key: "filePath", match: { value: filePath } },
+      ],
+    },
+  });
+}
+
+// Scroll toàn bộ collection, chỉ lấy 1 field payload (không kéo text về)
+async function scrollPayloadField(field: string, onValue: (value: any) => void): Promise<void> {
+  const c = getQdrantClient();
+  let offset: any = undefined;
+  do {
+    const result: any = await c.scroll(config.collectionName, {
+      limit: 1000,
+      with_payload: [field],
+      with_vector: false,
+      offset,
     });
-    return (result.operation_id as any) ?? 0;
-  } catch (err) {
-    console.error(`Failed to delete chunks for ${fileName}:`, err);
-    return 0;
-  }
+
+    for (const point of result.points) {
+      onValue((point.payload as any)?.[field]);
+    }
+    offset = result.next_page_offset;
+  } while (offset !== null && offset !== undefined);
 }
 
 export async function listIndexedFiles(): Promise<string[]> {
-  const c = getQdrantClient();
   const fileNames = new Set<string>();
 
   try {
-    let offset: any = undefined;
-    do {
-      const result: any = await c.scroll(config.collectionName, {
-        limit: 500,
-        with_payload: true,
-        offset,
-      });
-
-      for (const point of result.points) {
-        const fname = (point.payload as any)?.fileName;
-        if (fname) fileNames.add(fname);
-      }
-      offset = result.next_page_offset;
-    } while (offset !== null && offset !== undefined);
+    await scrollPayloadField("fileName", (fname) => {
+      if (fname) fileNames.add(fname);
+    });
   } catch (err) {
     console.error("Failed to list files:", err);
   }
 
   return Array.from(fileNames).sort();
+}
+
+// Throw khi lỗi: kết quả dùng để quyết định xóa nên không được trả về danh sách thiếu.
+export async function listIndexedFilePaths(): Promise<Set<string>> {
+  const filePaths = new Set<string>();
+  await scrollPayloadField("filePath", (p) => {
+    if (p) filePaths.add(p);
+  });
+  return filePaths;
 }
 
 export interface SearchResult {
@@ -183,24 +198,13 @@ export async function countPoints(): Promise<number> {
 }
 
 export async function getCategories(): Promise<Record<string, number>> {
-  const c = getQdrantClient();
   const categories: Record<string, number> = {};
 
   try {
-    let offset: any = undefined;
-    do {
-      const result: any = await c.scroll(config.collectionName, {
-        limit: 500,
-        with_payload: true,
-        offset,
-      });
-
-      for (const point of result.points) {
-        const cat = (point.payload as any)?.category || "Chung";
-        categories[cat] = (categories[cat] || 0) + 1;
-      }
-      offset = result.next_page_offset;
-    } while (offset !== null && offset !== undefined);
+    await scrollPayloadField("category", (value) => {
+      const cat = value || "Chung";
+      categories[cat] = (categories[cat] || 0) + 1;
+    });
   } catch (err) {
     console.error("Get categories failed:", err);
   }

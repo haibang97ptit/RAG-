@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { config } from "./config.js";
@@ -13,6 +14,7 @@ import {
 import {
   classifyIntent,
   classifyComplexity,
+  rewriteFollowUpQuery,
   expandQuery,
   generateHypotheticalAnswer,
   rerankChunks,
@@ -39,9 +41,35 @@ const fastify = Fastify({
 });
 
 await fastify.register(cors, {
-  origin: true,
+  origin: config.corsOrigins.length > 0 ? config.corsOrigins : true,
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
+});
+
+// ============== AUTH ==============
+
+function bearerMatches(header: string | undefined, expected: string): boolean {
+  if (!header || !header.startsWith("Bearer ")) return false;
+  // So sánh trên hash để độ dài bằng nhau và không lộ thông tin qua thời gian so sánh
+  const a = crypto.createHash("sha256").update(header.slice(7).trim()).digest();
+  const b = crypto.createHash("sha256").update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+// /health luôn mở (Docker healthcheck). /stats cần ADMIN_TOKEN, còn lại cần API_TOKEN.
+// Token nào để trống thì nhóm endpoint đó không bật auth.
+fastify.addHook("onRequest", async (request, reply) => {
+  if (request.method === "OPTIONS") return;
+
+  const urlPath = request.url.split("?")[0];
+  if (urlPath === "/health") return;
+
+  const expected = urlPath === "/stats" ? config.adminToken || config.apiToken : config.apiToken;
+  if (!expected) return;
+
+  if (!bearerMatches(request.headers.authorization, expected)) {
+    return reply.code(401).send({ error: "Unauthorized" });
+  }
 });
 
 interface QueryBody {
@@ -51,10 +79,30 @@ interface QueryBody {
 
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_UI_SOURCES = 5;
+const MAX_QUERY_CHARS = 4000;
+const MAX_HISTORY_CONTENT_CHARS = 8000;
 
-function limitHistory(history: ChatMessage[]): ChatMessage[] {
-  if (!history || history.length === 0) return [];
-  return history.slice(-MAX_HISTORY_MESSAGES);
+/**
+ * History do client gửi lên nên không tin được: chỉ giữ message user/assistant có nội dung
+ * (bỏ role "system" và message rỗng), cắt bớt message quá dài.
+ * Lọc chứ không trả 400 để app bản cũ vẫn dùng được.
+ */
+function sanitizeHistory(history: unknown): ChatMessage[] {
+  if (!Array.isArray(history)) return [];
+
+  const clean: ChatMessage[] = [];
+  for (const m of history) {
+    if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
+    if (typeof m.content !== "string" || !m.content.trim()) continue;
+    clean.push({ role: m.role, content: m.content.slice(0, MAX_HISTORY_CONTENT_CHARS) });
+  }
+  return clean.slice(-MAX_HISTORY_MESSAGES);
+}
+
+function validateQuery(query: unknown): string | null {
+  if (!query || typeof query !== "string" || !query.trim()) return "Thiếu query";
+  if (query.length > MAX_QUERY_CHARS) return `Query quá dài (tối đa ${MAX_QUERY_CHARS} ký tự)`;
+  return null;
 }
 
 /**
@@ -156,12 +204,13 @@ fastify.get("/stats", async () => {
 
 // JSON endpoint (debug)
 fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
-  const { query, history = [] } = request.body;
-  if (!query || typeof query !== "string") {
-    return reply.code(400).send({ error: "Thiếu query" });
+  const { query, history } = request.body ?? ({} as QueryBody);
+  const queryError = validateQuery(query);
+  if (queryError) {
+    return reply.code(400).send({ error: queryError });
   }
 
-  const limitedHistory = limitHistory(history);
+  const limitedHistory = sanitizeHistory(history);
   const intent = await classifyIntent(query, limitedHistory);
 
   let sources: any[] = [];
@@ -175,7 +224,9 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     }
   } else {
     const complexity = classifyComplexity(query);
-    const { reranked } = await enhancedRetrieve(query, complexity);
+    const searchQuery =
+      intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
+    const { reranked } = await enhancedRetrieve(searchQuery, complexity);
 
     sources = reranked.map((r) => ({
       fileName: r.fileName,
@@ -184,7 +235,7 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
       score: r.score,
     }));
 
-    const useCoT = config.enhancedRetrieval &&  complexity === "complex";
+    const useCoT = complexity === "complex";
     const sysPrompt =
       intent === "FOLLOW_UP"
         ? buildFollowUpSystemPrompt(reranked)
@@ -201,17 +252,24 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
 
 // SSE streaming endpoint
 fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
-  const { query, history = [] } = request.body;
-  if (!query || typeof query !== "string") {
-    return reply.code(400).send({ error: "Thiếu query" });
+  const { query, history } = request.body ?? ({} as QueryBody);
+  const queryError = validateQuery(query);
+  if (queryError) {
+    return reply.code(400).send({ error: queryError });
   }
 
+  // Ghi thẳng vào reply.raw nên header CORS của plugin không tự được gửi:
+  // CORS_ORIGINS có cấu hình → dùng header plugin đã tính; không → "*" như trước.
+  const corsHeaders =
+    config.corsOrigins.length > 0
+      ? (reply.getHeaders() as Record<string, string>)
+      : { "Access-Control-Allow-Origin": "*" };
+
   reply.raw.writeHead(200, {
+    ...corsHeaders,
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
     "X-Accel-Buffering": "no",
   });
 
@@ -221,7 +279,7 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
   };
 
   try {
-    const limitedHistory = limitHistory(history);
+    const limitedHistory = sanitizeHistory(history);
     const intent: Intent = await classifyIntent(query, limitedHistory);
     send("intent", { intent });
 
@@ -236,11 +294,15 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
       const complexity = classifyComplexity(query);
       send("complexity", { complexity });
 
-      // 2. Enhanced retrieve (HyDE + Query Expansion + Rerank)
-      const { reranked, stats } = await enhancedRetrieve(query, complexity);
-      fastify.log.info({ query, complexity, ...stats }, "retrieval_stats");
+      // 2. Follow-up: viết lại thành truy vấn độc lập để tìm đúng chủ đề đang nói
+      const searchQuery =
+        intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
 
-      // 3. Dedupe sources UI: top MAX_UI_SOURCES unique files
+      // 3. Enhanced retrieve (HyDE + Query Expansion + Rerank)
+      const { reranked, stats } = await enhancedRetrieve(searchQuery, complexity);
+      fastify.log.info({ query, searchQuery, intent, complexity, ...stats }, "retrieval_stats");
+
+      // 4. Dedupe sources UI: top MAX_UI_SOURCES unique files
       const seenFiles = new Set<string>();
       for (const r of reranked) {
         const key = `${r.fileName}::${r.sheetName || ""}`;
@@ -257,7 +319,7 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
       }
       send("sources", { sources: uiSources });
 
-      // 4. Build prompt (CoT khi complex, SOP vs FOLLOW_UP vs CHITCHAT)
+      // 5. Build prompt (CoT khi complex, SOP vs FOLLOW_UP vs CHITCHAT)
       const useCoT = complexity === "complex";
       sysPrompt =
         intent === "FOLLOW_UP"
@@ -265,7 +327,7 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
           : buildSOPSystemPrompt(reranked, useCoT);
     }
 
-    // 5. Stream LLM response
+    // 6. Stream LLM response
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
       send("chunk", { delta });
@@ -302,8 +364,13 @@ async function start() {
     console.log(`   🌊 Stream:  POST /query/stream (SSE)`);
     console.log(`\n   LLM main:    ${config.llmModel}`);
     console.log(`   LLM router:  ${config.routerModel}`);
-    console.log(`   Pipeline:    ${config.enhancedRetrieval ? "ENHANCED (HyDE + Expansion + Adaptive)" : "SIMPLE (basic retrieval)"}`);    console.log(`   Top-K:       ${config.topK} → union variants → rerank (5-15 adaptive)`);
+    console.log(`   Pipeline:    ${config.enhancedRetrieval ? "ENHANCED (HyDE + Expansion + Adaptive)" : "SIMPLE (basic retrieval)"}`);
+    console.log(`   Top-K:       ${config.topK} → rerank top ${config.rerankTopK}`);
     console.log(`   UI sources:  Max ${MAX_UI_SOURCES} unique files`);
+    console.log(`   Auth:        /query* ${config.apiToken ? "cần API_TOKEN" : "KHÔNG auth (API_TOKEN trống)"} | /stats ${config.adminToken || config.apiToken ? "cần token" : "KHÔNG auth"}`);
+    if (!config.apiToken) {
+      fastify.log.warn("API_TOKEN chưa đặt: ai truy cập được port này cũng gọi được /query");
+    }
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

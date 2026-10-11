@@ -20,7 +20,8 @@ services:
 
   backend:
     # Thay <OWNER>/<REPO> bằng path GitHub thực của em
-    image: ghcr.io/${GITHUB_OWNER:-haibang97ptit}/sop-ai-backend:latest
+    # IMAGE_TAG: đặt sha-xxxxxxx trong .env.prod để rollback về bản cũ
+    image: ghcr.io/${GITHUB_OWNER:-haibang97ptit}/sop-ai-backend:${IMAGE_TAG:-latest}
     container_name: sop-backend
     restart: unless-stopped
     depends_on:
@@ -31,24 +32,32 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY}
       QDRANT_URL: http://qdrant:6333
       PORT: "8000"
-      COLLECTION_NAME: sop_documents
+      # Đổi COLLECTION_NAME trong .env.prod để chuyển sang collection mới (xem docs/DEPLOY.md)
+      COLLECTION_NAME: ${COLLECTION_NAME:-sop_documents}
       LLM_MODEL: openai/gpt-oss-120b
       ROUTER_MODEL: openai/gpt-oss-20b
       EMBED_MODEL: Xenova/multilingual-e5-base
-      CHUNK_SIZE: "3000"
-      CHUNK_OVERLAP: "300"
+      # Đổi chunk size phải index lại toàn bộ
+      CHUNK_SIZE: "1200"
+      CHUNK_OVERLAP: "150"
       TOP_K: "20"
       RERANK_TOP_K: "10"
+      ENHANCED_RETRIEVAL: ${ENHANCED_RETRIEVAL:-false}
+      # Để trống = chưa bật auth cho /query* (giai đoạn app cũ chưa gửi token)
+      API_TOKEN: ${API_TOKEN:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       CACHE_DIR: /app/.cache
       DATA_DIR: /app/data
+      MANIFEST_DIR: /app/state
     volumes:
       # Model cache (ko muốn tải lại mỗi lần restart)
       - backend_cache:/app/.cache
       # Dữ liệu SOP đã sync từ SMB share về (xem scripts/sync-shared-folder.sh)
       - /opt/sop-local-data:/app/data:ro
-      # Manifest cho incremental
-      # - backend_manifest:/app
+      # Manifest của incremental ingest - phải nằm trên volume, nếu không mỗi lần
+      # recreate container sẽ mất và file đã xóa không bao giờ bị gỡ khỏi Qdrant
+      - backend_state:/app/state
     networks:
       - sop-net
 
@@ -61,5 +70,5 @@ volumes:
     driver: local
   backend_cache:
     driver: local
-  # backend_manifest:
-  #   driver: local
+  backend_state:
+    driver: local

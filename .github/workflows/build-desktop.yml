@@ -31,10 +31,15 @@ jobs:
         working-directory: desktop
         run: npm install
 
-      - name: Set backend URL
+      # API_TOKEN: repo secret, phải trùng API_TOKEN của backend (thiếu secret → app không gửi token)
+      - name: Set backend URL & API token
         working-directory: desktop
         shell: bash
-        run: echo "VITE_BACKEND_URL=${{ github.event.inputs.backend_url }}" > .env
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: |
+          echo "VITE_BACKEND_URL=${{ github.event.inputs.backend_url }}" > .env
+          echo "VITE_API_TOKEN=${API_TOKEN}" >> .env
 
       - name: Generate icons from source.png
         working-directory: desktop

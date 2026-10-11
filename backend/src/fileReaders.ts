@@ -113,19 +113,44 @@ async function readXLSX(filePath: string): Promise<{ sheetName: string; content:
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
-    const csv = XLSX.utils.sheet_to_csv(sheet);
-    if (!csv.trim()) continue;
 
-    const rows = csv.split("\n").filter((r) => r.trim());
+    // Đọc theo từng ô (không qua CSV) để ô có dấu phẩy / xuống dòng không làm lệch cột
+    const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+      header: 1,
+      raw: false,
+      defval: "",
+      blankrows: false,
+    });
+
+    const rows = rawRows
+      .map((row) =>
+        row.map((cell) =>
+          String(cell ?? "")
+            .replace(/\s+/g, " ")
+            .replace(/\|/g, "\\|")
+            .trim()
+        )
+      )
+      .filter((row) => row.some((cell) => cell !== ""));
     if (rows.length === 0) continue;
 
-    const headers = rows[0].split(",");
+    // Bỏ các cột trống ở cuối, pad các dòng ngắn cho đủ cột
+    const filledCols = (row: string[]) => {
+      let n = row.length;
+      while (n > 0 && row[n - 1] === "") n--;
+      return n;
+    };
+    const colCount = rows.reduce((max, row) => Math.max(max, filledCols(row)), 0);
+    const toLine = (row: string[]) => {
+      const cells = Array.from({ length: colCount }, (_, i) => row[i] || " ");
+      return `| ${cells.join(" | ")} |\n`;
+    };
+
     let md = `# Sheet: ${sheetName}\n\n`;
-    md += `| ${headers.join(" | ")} |\n`;
-    md += `| ${headers.map(() => "---").join(" | ")} |\n`;
+    md += toLine(rows[0]);
+    md += `| ${Array.from({ length: colCount }, () => "---").join(" | ")} |\n`;
     for (let i = 1; i < rows.length; i++) {
-      const cells = rows[i].split(",");
-      md += `| ${cells.join(" | ")} |\n`;
+      md += toLine(rows[i]);
     }
 
     results.push({ sheetName, content: md });
@@ -140,6 +165,10 @@ function extractCategory(filePath: string, dataDir: string): string {
   return parts.length > 1 ? parts[0] : "Chung";
 }
 
+/**
+ * Throw nếu file không parse được (caller quyết định retry / báo lỗi).
+ * Trả về [] nếu parse được nhưng không có text (vd PDF scan) - không index chunk rỗng.
+ */
 export async function readFile(
   filePath: string,
   dataDir: string
@@ -151,36 +180,39 @@ export async function readFile(
 
   const contextHeader = `[Tài liệu: ${fileName} | Phòng ban: ${category}]\n\n`;
 
-  try {
-    switch (ext) {
-      case ".pdf": {
-        const text = await readPDF(filePath);
-        return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType } }];
+  let text: string;
+  switch (ext) {
+    case ".pdf":
+      text = await readPDF(filePath);
+      break;
+    case ".docx":
+      text = await readDOCX(filePath);
+      break;
+    case ".txt":
+    case ".md":
+      text = await readText(filePath);
+      break;
+    case ".xlsx":
+    case ".xls": {
+      const sheets = await readXLSX(filePath);
+      if (sheets.length === 0) {
+        console.warn(`   ⚠️  ${fileName}: không có dữ liệu trong sheet nào`);
       }
-      case ".docx": {
-        const text = await readDOCX(filePath);
-        return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType } }];
-      }
-      case ".txt":
-      case ".md": {
-        const text = await readText(filePath);
-        return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType } }];
-      }
-      case ".xlsx":
-      case ".xls": {
-        const sheets = await readXLSX(filePath);
-        return sheets.map((s) => ({
-          text: contextHeader + s.content,
-          metadata: { fileName, filePath, category, fileType: "excel", sheetName: s.sheetName },
-        }));
-      }
-      default:
-        return [];
+      return sheets.map((s) => ({
+        text: contextHeader + s.content,
+        metadata: { fileName, filePath, category, fileType: "excel", sheetName: s.sheetName },
+      }));
     }
-  } catch (err) {
-    console.warn(`   ⚠️  Lỗi đọc ${fileName}: ${(err as Error).message}`);
+    default:
+      return [];
+  }
+
+  if (!text.trim()) {
+    console.warn(`   ⚠️  ${fileName}: không trích được text (file scan/ảnh?) - bỏ qua`);
     return [];
   }
+
+  return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType } }];
 }
 
 export async function walkDirectory(dir: string): Promise<string[]> {

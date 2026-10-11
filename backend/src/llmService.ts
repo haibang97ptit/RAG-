@@ -19,30 +19,64 @@ export interface ChatMessage {
   content: string;
 }
 
+// ============== KEYWORD MATCHING (tiếng Việt) ==============
+
+// `\b` của JS chỉ hiểu ký tự ASCII nên sai với từ có dấu ("ví dụ" không khớp, "nói" khớp nhầm "nó").
+// Dùng ranh giới từ theo Unicode: trước/sau keyword không được là chữ cái hoặc chữ số.
+const WORD_START = "(?<![\\p{L}\\p{N}])";
+const WORD_END = "(?![\\p{L}\\p{N}])";
+
+function keywordRegex(alternation: string): RegExp {
+  return new RegExp(`${WORD_START}(?:${alternation})${WORD_END}`, "iu");
+}
+
+// NFC để chữ có dấu gõ dạng tổ hợp (NFD) vẫn khớp keyword
+function normalizeText(text: string): string {
+  return text.normalize("NFC").toLowerCase().trim();
+}
+
+const META_KEYWORDS = keywordRegex(
+  "ngắn gọn|ngắn thôi|ngắn hơn|chi tiết hơn|chi tiết|giải thích thêm|giải thích|tóm tắt|tóm lại|cụ thể hơn|cụ thể|rõ hơn|rõ ràng hơn|ví dụ|liệt kê|dạng bảng|bảng biểu|tiếng anh|english|nguồn|file nào|mục nào|phần nào|trích dẫn|tại sao|vì sao|còn gì|còn nữa|thêm nữa|tiếp đi|tiếp theo|nói kỹ hơn|làm rõ|mở rộng|tổng hợp"
+);
+
+// Cả tin nhắn chỉ là lời chào/cảm ơn (có thể kèm từ xưng hô: "chào bạn", "cảm ơn nhiều nhé")
+const CHITCHAT_KEYWORDS = new RegExp(
+  "^(?:xin chào|chào|cảm ơn|cám ơn|thanks|thank you|thank|hello|hi|bye|tạm biệt|ok|oke|okey|yes|no|dạ|vâng|ừ)" +
+    "(?:\\s+(?:bạn|anh|chị|em|ad|bot|ạ|nhé|nha|nhiều|mọi người))*" +
+    "[\\s.!,]*$",
+  "iu"
+);
+
+const PRONOUN_REFS = keywordRegex(
+  "nó|cái đó|cái này|cái ấy|file đó|file này|tài liệu đó|tài liệu này|SOP đó|SOP này|đây|đó|ở trên|phía trên|vừa rồi"
+);
+
+const COMPLEX_KEYWORDS = keywordRegex(
+  "so sánh|so với|khác nhau|khác biệt|liệt kê|list|tổng hợp|đánh giá|phân tích|chi tiết|bao gồm|gồm những|tất cả|toàn bộ|có mấy|có bao nhiêu|compare|all|both|nhiều|sao để|làm sao|cách nào|như thế nào"
+);
+
 // ============== INTENT CLASSIFIER (với heuristic bypass) ==============
 
 export async function classifyIntent(
   userMessage: string,
   history: ChatMessage[]
 ): Promise<Intent> {
-  if (history.length === 0) return "NEW_QUESTION";
+  const msg = normalizeText(userMessage);
 
-  const msg = userMessage.toLowerCase().trim();
-  const wordCount = msg.split(/\s+/).filter(Boolean).length;
-
-  const metaKeywords = /\b(ngắn gọn|ngắn thôi|ngắn hơn|chi tiết hơn|chi tiết|giải thích thêm|giải thích|tóm tắt|tóm lại|cụ thể hơn|cụ thể|rõ hơn|rõ ràng hơn|ví dụ|liệt kê|dạng bảng|bảng biểu|tiếng anh|english|nguồn|file nào|mục nào|phần nào|trích dẫn|tại sao|vì sao|còn gì|còn nữa|thêm nữa|tiếp đi|tiếp theo|nói kỹ hơn|làm rõ|mở rộng|tổng hợp)\b/i;
-
-  if (wordCount <= 12 && metaKeywords.test(msg)) {
-    return "FOLLOW_UP";
-  }
-
-  const chitchatKeywords = /^(xin chào|chào|cảm ơn|thank|hello|hi|bye|tạm biệt|ok|oke|okey|yes|no|dạ|vâng|ừ)\b[\s\.\!]*$/i;
-  if (chitchatKeywords.test(msg)) {
+  // Check trước cả khi history rỗng: lời chào đầu tiên không cần chạy RAG
+  if (CHITCHAT_KEYWORDS.test(msg)) {
     return "CHITCHAT";
   }
 
-  const pronounRefs = /\b(nó|cái đó|cái này|cái ấy|file đó|file này|tài liệu đó|tài liệu này|SOP đó|SOP này|đây|đó|ở trên|phía trên|vừa rồi)\b/i;
-  if (wordCount <= 15 && pronounRefs.test(msg)) {
+  if (history.length === 0) return "NEW_QUESTION";
+
+  const wordCount = msg.split(/\s+/).filter(Boolean).length;
+
+  if (wordCount <= 12 && META_KEYWORDS.test(msg)) {
+    return "FOLLOW_UP";
+  }
+
+  if (wordCount <= 15 && PRONOUN_REFS.test(msg)) {
     return "FOLLOW_UP";
   }
 
@@ -87,14 +121,66 @@ CHỈ trả lời DUY NHẤT 1 từ: NEW_QUESTION / FOLLOW_UP / CHITCHAT.`;
 // ============== COMPLEXITY CLASSIFIER (pure heuristic) ==============
 
 export function classifyComplexity(query: string): Complexity {
-  const msg = query.toLowerCase();
-  const complexKeywords = /\b(so sánh|so với|khác nhau|khác biệt|liệt kê|list|tổng hợp|đánh giá|phân tích|chi tiết|bao gồm|gồm những|tất cả|toàn bộ|có mấy|có bao nhiêu|compare|all|both|nhiều|sao để|làm sao|cách nào|như thế nào)\b/i;
-  const wordCount = query.split(/\s+/).filter(Boolean).length;
+  const msg = normalizeText(query);
+  const wordCount = msg.split(/\s+/).filter(Boolean).length;
 
-  if (complexKeywords.test(msg) || wordCount > 15) {
+  if (COMPLEX_KEYWORDS.test(msg) || wordCount > 15) {
     return "complex";
   }
   return "simple";
+}
+
+// ============== FOLLOW-UP QUERY REWRITE ==============
+
+/**
+ * Câu follow-up ("ngắn gọn hơn", "nó áp dụng cho ai?") không tự mang chủ đề,
+ * embed nguyên văn sẽ tìm ra chunk không liên quan. Viết lại thành truy vấn độc lập
+ * dựa trên lịch sử để retrieval bám đúng chủ đề đang nói.
+ * Lỗi / output bất thường → trả về câu gốc.
+ */
+export async function rewriteFollowUpQuery(
+  userMessage: string,
+  history: ChatMessage[]
+): Promise<string> {
+  if (history.length === 0) return userMessage;
+
+  const historyText = history
+    .slice(-4)
+    .map((m) => `${m.role === "user" ? "User" : "AI"}: ${m.content.slice(0, 600)}`)
+    .join("\n");
+
+  const systemPrompt = `Bạn viết lại câu hỏi cho hệ thống tìm kiếm tài liệu SOP tiếng Việt.
+Dựa vào lịch sử hội thoại, viết lại tin nhắn mới nhất của user thành MỘT câu truy vấn ĐỘC LẬP, nêu đủ chủ đề, dùng để tìm tài liệu.
+
+QUY TẮC:
+- Thay đại từ (nó, cái đó, file đó, ở trên...) bằng đối tượng cụ thể trong lịch sử
+- Nếu user chỉ yêu cầu đổi cách trình bày (ngắn gọn, chi tiết hơn, dạng bảng, tiếng Anh, cho ví dụ...) thì truy vấn là CHỦ ĐỀ đang được nói tới, BỎ phần yêu cầu trình bày
+- Nếu tin nhắn mới đã đủ rõ, không phụ thuộc lịch sử thì giữ nguyên
+- Giữ nguyên mã số, tên viết tắt, tên thiết bị
+- KHÔNG trả lời câu hỏi. CHỈ trả về câu truy vấn trên 1 dòng, không giải thích, không ngoặc kép.`;
+
+  try {
+    const response = await getGroq().chat.completions.create({
+      model: config.routerModel,
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Lịch sử:\n${historyText}\n\nTin nhắn mới: "${userMessage}"\n\nTruy vấn độc lập:`,
+        },
+      ],
+      temperature: 0,
+      max_tokens: 400,
+    });
+
+    const content = response.choices[0]?.message?.content?.trim() || "";
+    const rewritten = content.split("\n")[0].replace(/^["'“”]+|["'“”]+$/g, "").trim();
+    if (!rewritten || rewritten.length > 500) return userMessage;
+    return rewritten;
+  } catch (err) {
+    console.warn("Follow-up rewrite failed:", (err as Error).message);
+    return userMessage;
+  }
 }
 
 // ============== QUERY EXPANSION ==============
