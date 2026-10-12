@@ -152,7 +152,9 @@ export default function App() {
                 }
                 return next;
               });
-            } else if (event === "sources") {
+            } else if (event === "done") {
+              // Nguồn chỉ hiện sau khi trả lời xong: backend gửi danh sách file mà câu trả lời
+              // thật sự dùng (rỗng nếu trò chuyện / không tìm thấy thông tin)
               setMessages((prev) => {
                 const next = [...prev];
                 const last = next[next.length - 1];
@@ -214,20 +216,6 @@ export default function App() {
     }
   }
 
-  // Dedupe sources theo fileName
-  function dedupeSources(sources: Source[]): Source[] {
-    const seen = new Set<string>();
-    const out: Source[] = [];
-    for (const s of sources) {
-      const key = `${s.fileName}::${s.sheetName || ""}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push(s);
-      }
-    }
-    return out;
-  }
-
   return (
     <div className="app">
       <header className="header">
@@ -278,7 +266,7 @@ export default function App() {
               <div className="sources">
                 <div className="sources-title">Nguồn tham khảo:</div>
                 <ul>
-                  {dedupeSources(m.sources).map((s, j) => (
+                  {m.sources.map((s, j) => (
                     <li key={j}>
                       <span className="src-file">{s.fileName}</span>
                       {s.sheetName && (

@@ -48,6 +48,14 @@ const CHITCHAT_KEYWORDS = new RegExp(
   "iu"
 );
 
+// Hỏi về chính trợ lý ("bạn là ai", "bạn làm được gì") - cũng không cần chạy RAG
+const ABOUT_ASSISTANT = new RegExp(
+  "^(?:(?:bạn|em|mày|bot|ai|chatbot|trợ lý)\\s+)?(?:này\\s+)?" +
+    "(?:là ai|là gì|tên gì|tên là gì|làm được gì|làm được những gì|có thể làm gì|giúp được gì|giúp gì được|biết làm gì|khỏe không|khoẻ không)" +
+    "(?:\\s+(?:vậy|thế|nhỉ|ạ|đấy|nào))*[\\s.!?,]*$",
+  "iu"
+);
+
 const PRONOUN_REFS = keywordRegex(
   "nó|cái đó|cái này|cái ấy|file đó|file này|tài liệu đó|tài liệu này|SOP đó|SOP này|đây|đó|ở trên|phía trên|vừa rồi"
 );
@@ -65,7 +73,7 @@ export async function classifyIntent(
   const msg = normalizeText(userMessage);
 
   // Check trước cả khi history rỗng: lời chào đầu tiên không cần chạy RAG
-  if (CHITCHAT_KEYWORDS.test(msg)) {
+  if (CHITCHAT_KEYWORDS.test(msg) || ABOUT_ASSISTANT.test(msg)) {
     return "CHITCHAT";
   }
 
@@ -340,6 +348,12 @@ const FORMAT_RULES = `CÁCH TRÌNH BÀY (câu trả lời hiển thị trong c�
 - KHÔNG dùng thẻ HTML (<br>, <b>...), KHÔNG lồng danh sách trong ô bảng
 - Chỉ in đậm thuật ngữ / mã quan trọng, không in đậm cả câu`;
 
+const VOICE_RULES = `GIỌNG VĂN:
+- Nói chuyện tự nhiên như một đồng nghiệp am hiểu quy trình đang giải thích cho người hỏi; xưng "tôi", gọi người dùng là "bạn"
+- Câu ngắn, rõ, đời thường. Không rập khuôn, không lặp lại câu hỏi, không mở đầu kiểu "Dựa trên tài liệu được cung cấp..." hay "Theo các nguồn tham khảo..."
+- Tự nhiên trong cách diễn đạt nhưng CHÍNH XÁC về nội dung: số liệu, mã, tên thiết bị, các bước giữ đúng như tài liệu
+- KHÔNG dùng emoji, KHÔNG kết bằng câu xã giao kiểu "Hy vọng giúp được bạn"`;
+
 /**
  * Danh sách tên file có mã khớp với câu hỏi. Đoạn trích chỉ là vài phần giống câu hỏi nhất,
  * nên muốn đếm/liệt kê tài liệu thì LLM phải dựa vào danh sách này.
@@ -395,14 +409,18 @@ Sau đó viết câu trả lời ĐẦY ĐỦ, có CẤU TRÚC, trích nguồn R
 
 QUY TẮC NGHIÊM NGẶT:
 1. CHỈ trả lời dựa trên TÀI LIỆU THAM KHẢO phía dưới - KHÔNG tự bịa thông tin
-2. Nếu tài liệu KHÔNG CÓ thông tin, trả lời thẳng: "Tôi không tìm thấy thông tin về [chủ đề] trong tài liệu được cung cấp."
+2. Nếu tài liệu KHÔNG CÓ thông tin để trả lời, xử lý theo loại câu hỏi:
+   a) Câu hỏi về SOP / quy trình / công việc của công ty: nói ngắn gọn, tự nhiên rằng bạn không tìm thấy nội dung này trong các tài liệu SOP hiện có, rồi gợi ý người dùng nêu mã SOP hoặc mô tả cụ thể hơn. KHÔNG bịa, KHÔNG suy đoán.
+   b) Câu hỏi KHÔNG liên quan tới SOP hay công việc (trò chuyện, hỏi về bạn, thời tiết, kiến thức chung...): đáp lại ngắn gọn, thân thiện trong 1-3 câu như một trợ lý bình thường, rồi cho biết bạn là trợ lý tra cứu SOP nên chỉ hỗ trợ được các câu hỏi về quy trình, tài liệu của công ty. KHÔNG trích nguồn, KHÔNG nhắc tới "tài liệu được cung cấp".
+   Trong mọi trường hợp: thông tin chuyên môn (dược, GMP, kỹ thuật, quy định) CHỈ được lấy từ tài liệu - không trả lời bằng kiến thức riêng, kể cả khi bạn biết.
 3. KHÔNG BAO GIỜ gộp/mix dữ liệu từ các file khác nhau. Mỗi thông tin phải trích đúng file gốc.
 4. Khi trích thông tin, PHẢI ghi rõ nguồn bằng TÊN FILE hoặc MÃ tài liệu: "Theo file [TÊN], ..." hoặc "(Nguồn: [MÃ])". KHÔNG ghi "Nguồn 1", "Nguồn 5" - user không nhìn thấy số thứ tự nguồn
 5. Nếu 2 file có thông tin KHÁC NHAU về cùng chủ đề, trình bày RIÊNG từng file - KHÔNG tổng hợp sai
 6. Trả lời bằng tiếng Việt, có cấu trúc
-7. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.
-8. Khi liệt kê (thiết bị, bước, nhân sự...), trình bày đầy đủ không bỏ sót
-9. Giữ nguyên mã số, tên viết tắt, tên thiết bị như trong tài liệu
+7. Khi liệt kê (thiết bị, bước, nhân sự...), trình bày đầy đủ không bỏ sót
+8. Giữ nguyên mã số, tên viết tắt, tên thiết bị như trong tài liệu
+
+${VOICE_RULES}
 
 ${FORMAT_RULES}
 ${cotSection}${buildCatalogSection(catalog)}
@@ -450,7 +468,9 @@ QUY TẮC:
 3. KHÔNG trả lời "không tìm thấy" nếu chủ đề đã có trong câu trước
 4. Trích nguồn bằng TÊN FILE hoặc MÃ tài liệu (KHÔNG ghi "Nguồn 1", "Nguồn 5" - user không nhìn thấy số thứ tự nguồn), không bịa, không mix data giữa file
 5. Trả lời bằng tiếng Việt
-6. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.
+
+${VOICE_RULES}
+
 ${FORMAT_RULES}
 ${buildCatalogSection(catalog)}${contextSection}`;
 }
@@ -458,11 +478,12 @@ ${buildCatalogSection(catalog)}${contextSection}`;
 export function buildChitChatSystemPrompt(): string {
   return `Bạn là trợ lý AI nội bộ của công ty, giúp nhân viên tra cứu tài liệu SOP.
 
-Người dùng đang chào hỏi hoặc nói chuyện ngoài lề. Hãy:
-1. Trả lời LỊCH SỰ, NGẮN GỌN (1-2 câu)
-2. Nếu phù hợp, gợi ý: "Bạn có thể hỏi tôi về các quy trình, chính sách, SOP của công ty."
-3. KHÔNG dùng emoji
-4. Trả lời bằng tiếng Việt tự nhiên`;
+Người dùng đang chào hỏi, cảm ơn, hỏi về bạn hoặc nói chuyện ngoài lề. Hãy:
+1. Đáp lại tự nhiên, thân thiện như một đồng nghiệp, NGẮN GỌN (1-2 câu); xưng "tôi", gọi người dùng là "bạn". Đáp đúng vào điều người dùng vừa nói, không dùng một câu mẫu cho mọi trường hợp.
+2. Nếu được hỏi bạn là ai / làm được gì: bạn là trợ lý tra cứu SOP nội bộ - tìm và giải thích quy trình, biểu mẫu, phụ lục; người dùng có thể hỏi theo nội dung hoặc theo mã SOP.
+3. Chỉ gợi ý hỏi về SOP khi hợp ngữ cảnh (ví dụ lời chào đầu tiên), không lặp lại ở mọi câu.
+4. Câu hỏi kiến thức ngoài phạm vi SOP (thời tiết, tin tức, kiến thức chung, chuyên môn dược...): nói nhẹ nhàng rằng bạn chỉ hỗ trợ tra cứu SOP, không tự trả lời bằng kiến thức riêng.
+5. KHÔNG dùng emoji. Trả lời bằng tiếng Việt.`;
 }
 
 // ============== STREAM CHAT ==============

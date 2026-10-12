@@ -27,6 +27,7 @@ import {
   type ChatMessage,
   type Intent,
 } from "./llmService.js";
+import { selectDisplayedSources, type UiSource } from "./citedSources.js";
 import {
   findCatalogForQuery,
   isMainDocument,
@@ -359,7 +360,8 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     send("intent", { intent });
 
     let sysPrompt: string;
-    let uiSources: any[] = [];
+    // Mọi file có đoạn trích đưa vào prompt (không trùng), theo thứ tự ưu tiên
+    const retrievedSources: UiSource[] = [];
 
     if (intent === "CHITCHAT") {
       sysPrompt = buildChitChatSystemPrompt();
@@ -388,22 +390,23 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
         "retrieval_stats"
       );
 
-      // 4. Dedupe sources UI: top MAX_UI_SOURCES unique files
+      // 4. Dedupe sources theo file
       const seenFiles = new Set<string>();
       for (const r of reranked) {
         const key = `${r.fileName}::${r.sheetName || ""}`;
         if (!seenFiles.has(key)) {
           seenFiles.add(key);
-          uiSources.push({
+          retrievedSources.push({
             fileName: r.fileName,
             category: r.category,
             sheetName: r.sheetName,
             score: Math.round(r.score * 1000) / 1000,
           });
-          if (uiSources.length >= MAX_UI_SOURCES) break;
         }
       }
-      send("sources", { sources: uiSources });
+      // Gửi trước khi có câu trả lời (app bản cũ hiển thị danh sách này).
+      // Danh sách chính thức nằm trong event "done", sau khi biết câu trả lời dùng nguồn nào.
+      send("sources", { sources: retrievedSources.slice(0, MAX_UI_SOURCES) });
 
       // 5. Build prompt (CoT khi complex, SOP vs FOLLOW_UP vs CHITCHAT)
       const useCoT = complexity === "complex";
@@ -415,11 +418,17 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
 
     // 6. Stream LLM response
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
+    let answer = "";
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
+      answer += delta;
       send("chunk", { delta });
     }
 
-    send("done", { intent, sources: uiSources });
+    // 7. Nguồn hiển thị: chỉ các file câu trả lời thật sự dùng; không có gì nếu "không tìm thấy"
+    send("done", {
+      intent,
+      sources: selectDisplayedSources(answer, retrievedSources, MAX_UI_SOURCES),
+    });
   } catch (err) {
     fastify.log.error(err);
     send("error", { message: (err as Error).message });
