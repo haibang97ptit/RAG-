@@ -49,6 +49,14 @@ services:
       API_TOKEN: ${API_TOKEN:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # QualZen (SQL Server): tra cứu Action Item, CCN, CAPA. Để trống QUALZEN_DB_SERVER = tắt.
+      # Dùng tài khoản SQL chỉ có quyền đọc.
+      QUALZEN_DB_SERVER: ${QUALZEN_DB_SERVER:-}
+      QUALZEN_DB_PORT: ${QUALZEN_DB_PORT:-1433}
+      QUALZEN_DB_NAME: ${QUALZEN_DB_NAME:-}
+      QUALZEN_DB_USER: ${QUALZEN_DB_USER:-}
+      QUALZEN_DB_PASSWORD: ${QUALZEN_DB_PASSWORD:-}
+      QUALZEN_DB_ENCRYPT: ${QUALZEN_DB_ENCRYPT:-false}
       CACHE_DIR: /app/.cache
       DATA_DIR: /app/data
       MANIFEST_DIR: /app/state
