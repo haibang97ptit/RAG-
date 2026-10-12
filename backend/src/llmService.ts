@@ -131,6 +131,17 @@ export function classifyComplexity(query: string): Complexity {
   return "simple";
 }
 
+// ============== OVERVIEW QUESTION (pure heuristic) ==============
+
+const OVERVIEW_KEYWORDS = keywordRegex(
+  "nội dung|tóm tắt|tóm lược|tổng quan|khái quát|giới thiệu|nói về gì|nói về cái gì|là gì|mục đích|phạm vi|overview|summary|summarize"
+);
+
+/** Câu hỏi về tổng thể một tài liệu ("nội dung SOP IT 1012", "SOP 0005 nói về gì"). */
+export function isOverviewQuestion(query: string): boolean {
+  return OVERVIEW_KEYWORDS.test(normalizeText(query));
+}
+
 // ============== FOLLOW-UP QUERY REWRITE ==============
 
 /**
@@ -321,6 +332,14 @@ Ví dụ output: [3, 7, 1, 12, 5]`;
 
 // ============== PROMPT BUILDERS ==============
 
+// Câu trả lời hiển thị trong cửa sổ chat hẹp (~400px), render markdown.
+const FORMAT_RULES = `CÁCH TRÌNH BÀY (câu trả lời hiển thị trong cửa sổ chat HẸP):
+- Mở đầu bằng 1-2 câu trả lời thẳng vào câu hỏi, rồi mới tới chi tiết
+- Ưu tiên tiêu đề ngắn + gạch đầu dòng; các bước tuần tự dùng danh sách đánh số (1. 2. 3.)
+- CHỈ dùng bảng khi dữ liệu thật sự dạng bảng, tối đa 3 cột, nội dung mỗi ô ngắn (vài từ). Nội dung dài hoặc nhiều ý trong một ô → dùng gạch đầu dòng thay cho bảng
+- KHÔNG dùng thẻ HTML (<br>, <b>...), KHÔNG lồng danh sách trong ô bảng
+- Chỉ in đậm thuật ngữ / mã quan trọng, không in đậm cả câu`;
+
 /**
  * Danh sách tên file có mã khớp với câu hỏi. Đoạn trích chỉ là vài phần giống câu hỏi nhất,
  * nên muốn đếm/liệt kê tài liệu thì LLM phải dựa vào danh sách này.
@@ -340,6 +359,7 @@ ${lines}${truncated}
 
 CÁCH DÙNG DANH MỤC FILE:
 - User thường GỌI TẮT mã tài liệu: "SOP 0005", "SOP QA 0005", "SOP-GEN 0005 QA" đều chỉ cùng một SOP. Các file trong danh mục chính là tài liệu user đang nhắc tới - hãy hiểu câu hỏi là về (các) tài liệu này và gọi đúng mã đầy đủ khi trả lời. KHÔNG trả lời "không tìm thấy SOP 0005" khi danh mục có file khớp.
+- Khi user hỏi NỘI DUNG / TÓM TẮT / "nói về gì" của một SOP trong danh mục: tóm tắt từ các đoạn trích thuộc SOP đó (mục đích, phạm vi, trách nhiệm, các bước chính - có gì nêu nấy) và ghi rõ đây là tóm tắt từ phần đầu tài liệu, chưa phải toàn văn. Chỉ trả lời "không tìm thấy" khi KHÔNG có đoạn trích nào thuộc SOP đó.
 - Nếu danh mục chứa nhiều SOP KHÁC NHAU trùng số (khác phòng ban hoặc khác nhóm mã), nói rõ có những SOP nào và trả lời riêng cho từng SOP.
 - Khi user hỏi CÓ BAO NHIÊU / LIỆT KÊ tài liệu, biểu mẫu, phụ lục của một SOP: đếm và liệt kê theo DANH MỤC FILE này. KHÔNG đếm theo số đoạn trích bên dưới - đoạn trích chỉ là một phần nhỏ.
 - Phân nhóm theo ký hiệu trong tên file: -Fxx (F01, F02...) = biểu mẫu (Format), -Axx (A01, A02...) = phụ lục (Appendix), file không có ký hiệu F/A là SOP chính. Khi đếm biểu mẫu chỉ đếm file -Fxx, khi đếm phụ lục chỉ đếm file -Axx.
@@ -377,12 +397,14 @@ QUY TẮC NGHIÊM NGẶT:
 1. CHỈ trả lời dựa trên TÀI LIỆU THAM KHẢO phía dưới - KHÔNG tự bịa thông tin
 2. Nếu tài liệu KHÔNG CÓ thông tin, trả lời thẳng: "Tôi không tìm thấy thông tin về [chủ đề] trong tài liệu được cung cấp."
 3. KHÔNG BAO GIỜ gộp/mix dữ liệu từ các file khác nhau. Mỗi thông tin phải trích đúng file gốc.
-4. Khi trích thông tin, PHẢI ghi rõ nguồn: "Theo file [TÊN], ..." hoặc "(Nguồn: [MÃ])"
+4. Khi trích thông tin, PHẢI ghi rõ nguồn bằng TÊN FILE hoặc MÃ tài liệu: "Theo file [TÊN], ..." hoặc "(Nguồn: [MÃ])". KHÔNG ghi "Nguồn 1", "Nguồn 5" - user không nhìn thấy số thứ tự nguồn
 5. Nếu 2 file có thông tin KHÁC NHAU về cùng chủ đề, trình bày RIÊNG từng file - KHÔNG tổng hợp sai
-6. Trả lời bằng tiếng Việt, có cấu trúc (gạch đầu dòng/bảng khi cần)
+6. Trả lời bằng tiếng Việt, có cấu trúc
 7. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.
 8. Khi liệt kê (thiết bị, bước, nhân sự...), trình bày đầy đủ không bỏ sót
 9. Giữ nguyên mã số, tên viết tắt, tên thiết bị như trong tài liệu
+
+${FORMAT_RULES}
 ${cotSection}${buildCatalogSection(catalog)}
 TÀI LIỆU THAM KHẢO:
 ═══════════════════════════════
@@ -426,9 +448,10 @@ QUY TẮC:
 1. ĐỌC KỸ câu trả lời TRƯỚC của AI để hiểu chủ đề đang nói
 2. KHÔNG tự ý chuyển chủ đề nếu user chỉ yêu cầu format
 3. KHÔNG trả lời "không tìm thấy" nếu chủ đề đã có trong câu trước
-4. Trích nguồn file, không bịa, không mix data giữa file
+4. Trích nguồn bằng TÊN FILE hoặc MÃ tài liệu (KHÔNG ghi "Nguồn 1", "Nguồn 5" - user không nhìn thấy số thứ tự nguồn), không bịa, không mix data giữa file
 5. Trả lời bằng tiếng Việt
 6. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.
+${FORMAT_RULES}
 ${buildCatalogSection(catalog)}${contextSection}`;
 }
 

@@ -6,6 +6,7 @@ import { initEmbedder, embedQuery } from "./embedding.js";
 import {
   ensureCollection,
   searchSimilar,
+  fetchOpeningChunks,
   countPoints,
   getCategories,
   listIndexedFiles,
@@ -14,6 +15,7 @@ import {
 import {
   classifyIntent,
   classifyComplexity,
+  isOverviewQuestion,
   rewriteFollowUpQuery,
   expandQuery,
   generateHypotheticalAnswer,
@@ -25,7 +27,12 @@ import {
   type ChatMessage,
   type Intent,
 } from "./llmService.js";
-import { findCatalogForQuery, type CatalogMatch } from "./fileCatalog.js";
+import {
+  findCatalogForQuery,
+  isMainDocument,
+  mentionsFormOrAppendix,
+  type CatalogMatch,
+} from "./fileCatalog.js";
 
 const fastify = Fastify({
   logger: {
@@ -80,6 +87,7 @@ interface QueryBody {
 
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_UI_SOURCES = 5;
+const OVERVIEW_OPENING_RATIO = 0.6;
 const MAX_QUERY_CHARS = 4000;
 const MAX_HISTORY_CONTENT_CHARS = 8000;
 
@@ -121,10 +129,24 @@ function focusPathsOf(catalog: CatalogMatch | null): string[] {
  * - Union + dedupe
  * - Rerank với topK adaptive
  */
+/**
+ * Câu hỏi tổng quan về một tài liệu được nhắc đích danh ("nội dung SOP IT 1012") → các file
+ * cần lấy phần mở đầu: SOP chính trong danh mục (không phải biểu mẫu/phụ lục).
+ * Nếu user hỏi đích danh một biểu mẫu/phụ lục thì không áp dụng (để vector search xử lý).
+ */
+function overviewPathsOf(query: string, catalog: CatalogMatch | null): string[] {
+  const focus = focusPathsOf(catalog);
+  if (focus.length === 0 || !isOverviewQuestion(query) || mentionsFormOrAppendix(query)) return [];
+
+  const mainDocs = catalog!.files.filter((f) => isMainDocument(f.fileName)).map((f) => f.filePath);
+  return mainDocs.length > 0 ? mainDocs : focus;
+}
+
 async function enhancedRetrieve(
   query: string,
   complexity: "simple" | "complex",
-  focusFilePaths: string[] = []
+  focusFilePaths: string[] = [],
+  overviewFilePaths: string[] = []
 ): Promise<{ reranked: SearchResult[]; stats: any }> {
   const stats: any = {};
 
@@ -157,6 +179,28 @@ async function enhancedRetrieve(
     for (const r of focused) addResult(r);
     for (const r of general) addResult(r);
   };
+
+  // ============== OVERVIEW: phần mở đầu của tài liệu, theo thứ tự ==============
+  // Không rerank: câu hỏi kiểu "nội dung SOP X" không có gì để chấm độ liên quan,
+  // thứ tự trong tài liệu mới là thứ cần giữ.
+  if (overviewFilePaths.length > 0) {
+    stats.mode = "overview";
+    // Phần mở đầu chiếm ~60% số đoạn, còn lại là đoạn giống câu hỏi nhất trong tài liệu,
+    // để câu hỏi nghe như tổng quan nhưng thật ra hỏi chi tiết ("nội dung phần sao lưu") vẫn có đáp án.
+    const openingBudget = Math.ceil(config.rerankTopK * OVERVIEW_OPENING_RATIO);
+    const perFile = Math.max(1, Math.ceil(openingBudget / overviewFilePaths.length));
+    const [opening, similar] = await Promise.all([
+      fetchOpeningChunks(overviewFilePaths, perFile),
+      embedQuery(query).then((vec) => searchSimilar(vec, config.topK, focusFilePaths)),
+    ]);
+    for (const r of opening.slice(0, openingBudget)) addResult(r);
+    stats.opening_chunks = allResults.length;
+    for (const r of similar) addResult(r);
+    stats.unique_candidates = allResults.length;
+    const reranked = allResults.slice(0, config.rerankTopK);
+    stats.reranked_count = reranked.length;
+    return { reranked, stats };
+  }
 
   // ============== SIMPLE PIPELINE (khi flag off) ==============
   if (!config.enhancedRetrieval) {
@@ -252,7 +296,12 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     const searchQuery =
       intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
     const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
-    const { reranked } = await enhancedRetrieve(searchQuery, complexity, focusPathsOf(catalog));
+    const { reranked } = await enhancedRetrieve(
+      searchQuery,
+      complexity,
+      focusPathsOf(catalog),
+      overviewPathsOf(searchQuery, catalog)
+    );
 
     sources = reranked.map((r) => ({
       fileName: r.fileName,
@@ -331,7 +380,8 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
       const { reranked, stats } = await enhancedRetrieve(
         searchQuery,
         complexity,
-        focusPathsOf(catalog)
+        focusPathsOf(catalog),
+        overviewPathsOf(searchQuery, catalog)
       );
       fastify.log.info(
         { query, searchQuery, intent, complexity, catalog_files: catalog?.total ?? 0, ...stats },

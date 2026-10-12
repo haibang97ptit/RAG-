@@ -86,6 +86,19 @@ export function matchFilesByCode(
   return Array.from(matched).sort((a, b) => a.fileName.localeCompare(b.fileName));
 }
 
+// Ký hiệu biểu mẫu / phụ lục trong mã: -F01, -A03 (F = Format, A = Appendix)
+const FORM_OR_APPENDIX = /(?<![\p{L}\p{N}])[fa]\d{1,3}(?![\p{L}\p{N}])/iu;
+
+/** File không có ký hiệu F/A trong tên là SOP chính. */
+export function isMainDocument(fileName: string): boolean {
+  return !FORM_OR_APPENDIX.test(fileName.replace(/\.[^.]+$/, ""));
+}
+
+/** Câu hỏi có nhắc đích danh một biểu mẫu / phụ lục ("F07 của SOP 0005") không. */
+export function mentionsFormOrAppendix(query: string): boolean {
+  return FORM_OR_APPENDIX.test(query.normalize("NFC"));
+}
+
 /** Lỗi khi tra danh mục không được làm hỏng câu trả lời → trả về null. */
 export async function findCatalogForQuery(query: string): Promise<CatalogMatch | null> {
   try {

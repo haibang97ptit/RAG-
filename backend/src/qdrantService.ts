@@ -218,6 +218,49 @@ export async function searchSimilar(
   });
 }
 
+/**
+ * Lấy `perFile` chunk ĐẦU TIÊN của mỗi file, theo đúng thứ tự trong tài liệu.
+ * Dùng cho câu hỏi tổng quan ("nội dung SOP X", "tóm tắt SOP X"): câu hỏi không có nội dung
+ * để so khớp vector, còn phần mở đầu tài liệu thì có mục đích, phạm vi, trách nhiệm.
+ */
+export async function fetchOpeningChunks(
+  filePaths: string[],
+  perFile: number
+): Promise<SearchResult[]> {
+  if (filePaths.length === 0) return [];
+
+  const c = getQdrantClient();
+  const response: any = await c.scroll(config.collectionName, {
+    limit: filePaths.length * perFile,
+    with_payload: true,
+    with_vector: false,
+    filter: {
+      must: [
+        { key: "filePath", match: { any: filePaths } },
+        { key: "chunkIndex", range: { lt: perFile } },
+      ],
+    },
+  });
+
+  const fileOrder = new Map(filePaths.map((p, i) => [p, i]));
+  return response.points
+    .map((p: any) => p.payload)
+    .sort(
+      (a: any, b: any) =>
+        (fileOrder.get(a.filePath) ?? 0) - (fileOrder.get(b.filePath) ?? 0) ||
+        a.chunkIndex - b.chunkIndex
+    )
+    .map((payload: any) => ({
+      score: 1,
+      text: payload.text,
+      fileName: payload.fileName,
+      filePath: payload.filePath,
+      category: payload.category,
+      fileType: payload.fileType,
+      sheetName: payload.sheetName,
+    }));
+}
+
 export async function countPoints(): Promise<number> {
   try {
     const c = getQdrantClient();

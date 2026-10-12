@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import Markdown from "./Markdown";
 
 interface Source {
   fileName: string;
@@ -263,10 +264,14 @@ export default function App() {
               {m.role === "assistant" && <IntentBadge intent={m.intent} />}
             </div>
             <div className="msg-body">
-              {m.content || (
+              {!m.content ? (
                 <span className="typing">
                   <span /> <span /> <span />
                 </span>
+              ) : m.role === "assistant" ? (
+                <Markdown content={m.content} />
+              ) : (
+                m.content
               )}
             </div>
             {m.role === "assistant" && m.sources && m.sources.length > 0 && (
