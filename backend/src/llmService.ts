@@ -339,7 +339,7 @@ ${lines}${truncated}
 
 CÁCH DÙNG DANH MỤC FILE:
 - Khi user hỏi CÓ BAO NHIÊU / LIỆT KÊ tài liệu, biểu mẫu, phụ lục của một SOP: đếm và liệt kê theo DANH MỤC FILE này. KHÔNG đếm theo số đoạn trích bên dưới - đoạn trích chỉ là một phần nhỏ.
-- Phân nhóm theo ký hiệu trong tên file nếu có (ví dụ -F01 = Form/biểu mẫu, -A01 = Appendix/phụ lục, file không có ký hiệu đó là SOP chính) và nói rõ bạn phân nhóm theo ký hiệu nào.
+- Phân nhóm theo ký hiệu trong tên file: -Fxx (F01, F02...) = biểu mẫu (Format), -Axx (A01, A02...) = phụ lục (Appendix), file không có ký hiệu F/A là SOP chính. Khi đếm biểu mẫu chỉ đếm file -Fxx, khi đếm phụ lục chỉ đếm file -Axx.
 - Danh mục chỉ cho biết file nào TỒN TẠI. Nội dung bên trong file vẫn phải lấy từ TÀI LIỆU THAM KHẢO.
 `;
 }
