@@ -16,11 +16,13 @@ const MAX_CATALOG_FILES = 80;
 export interface CatalogMatch {
   files: IndexedFile[]; // tối đa MAX_CATALOG_FILES
   total: number;
+  // Mỗi mã tài liệu nhắc trong câu hỏi là một nhóm (dùng khi so sánh 2 tài liệu với nhau)
+  groups: IndexedFile[][];
 }
 
 let cache: { files: IndexedFile[]; loadedAt: number } | null = null;
 
-async function getIndexedFiles(): Promise<IndexedFile[]> {
+export async function getIndexedFiles(): Promise<IndexedFile[]> {
   if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) return cache.files;
   const files = await listIndexedFileEntries();
   cache = { files, loadedAt: Date.now() };
@@ -56,12 +58,22 @@ export function matchFilesByCode(
   files: IndexedFile[],
   preferredCategory: string = ""
 ): IndexedFile[] {
+  const matched = new Set(matchFileGroupsByCode(query, files, preferredCategory).flat());
+  return Array.from(matched).sort((a, b) => a.fileName.localeCompare(b.fileName));
+}
+
+/** Như matchFilesByCode nhưng giữ riêng từng nhóm: mỗi mã tài liệu trong câu hỏi là một nhóm file (theo thứ tự xuất hiện). */
+export function matchFileGroupsByCode(
+  query: string,
+  files: IndexedFile[],
+  preferredCategory: string = ""
+): IndexedFile[][] {
   const queryTokens = Array.from(new Set(tokenize(query)));
   const docNumbers = queryTokens.filter(isDocNumber);
   if (docNumbers.length === 0) return [];
 
   const codeTokens = queryTokens.filter(isCodeToken);
-  const matched = new Set<IndexedFile>();
+  const groups: IndexedFile[][] = [];
   for (const docNumber of docNumbers) {
     const candidates = files
       .map((file) => ({ file, tokens: codePartTokens(file.fileName, docNumber) }))
@@ -80,10 +92,10 @@ export function matchFilesByCode(
     );
     if (preferred.length > 0 && preferred.length < group.length) group = preferred;
 
-    for (const file of group) matched.add(file);
+    if (group.length > 0) groups.push(group.sort((a, b) => a.fileName.localeCompare(b.fileName)));
   }
 
-  return Array.from(matched).sort((a, b) => a.fileName.localeCompare(b.fileName));
+  return groups;
 }
 
 // Ký hiệu biểu mẫu / phụ lục trong mã: -F01, -A03 (F = Format, A = Appendix)
@@ -102,9 +114,10 @@ export function mentionsFormOrAppendix(query: string): boolean {
 /** Lỗi khi tra danh mục không được làm hỏng câu trả lời → trả về null. */
 export async function findCatalogForQuery(query: string): Promise<CatalogMatch | null> {
   try {
-    const matched = matchFilesByCode(query, await getIndexedFiles(), config.defaultCategory);
+    const groups = matchFileGroupsByCode(query, await getIndexedFiles(), config.defaultCategory);
+    const matched = Array.from(new Set(groups.flat())).sort((a, b) => a.fileName.localeCompare(b.fileName));
     if (matched.length === 0) return null;
-    return { files: matched.slice(0, MAX_CATALOG_FILES), total: matched.length };
+    return { files: matched.slice(0, MAX_CATALOG_FILES), total: matched.length, groups };
   } catch (err) {
     console.warn("File catalog lookup failed:", (err as Error).message);
     return null;

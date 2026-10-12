@@ -2,6 +2,7 @@ import Groq from "groq-sdk";
 import { config } from "./config.js";
 import type { SearchResult } from "./qdrantService.js";
 import type { CatalogMatch } from "./fileCatalog.js";
+import type { OverlapContext } from "./overlapFinder.js";
 
 let groqClient: Groq | null = null;
 
@@ -148,6 +149,30 @@ const OVERVIEW_KEYWORDS = keywordRegex(
 /** Câu hỏi về tổng thể một tài liệu ("nội dung SOP IT 1012", "SOP 0005 nói về gì"). */
 export function isOverviewQuestion(query: string): boolean {
   return OVERVIEW_KEYWORDS.test(normalizeText(query));
+}
+
+// ============== OVERLAP / COMPARE QUESTION (pure heuristic) ==============
+
+// Nói rõ về trùng lặp / chồng chéo giữa các tài liệu, hoặc hỏi một việc được quy định ở những tài liệu nào
+const OVERLAP_KEYWORDS = keywordRegex(
+  "trùng lặp|trùng nhau|trùng với|bị trùng|chồng chéo|mâu thuẫn với|mâu thuẫn nhau|mâu thuẫn giữa|hợp nhất|gom về|gộp chung|những sop nào|các sop nào|những tài liệu nào|các tài liệu nào|những quy trình nào|overlap|overlapping|duplicate|duplicated"
+);
+
+// Câu hỏi phải đang nói về tài liệu / quy định, để "mẫu bị trùng lặp thì xử lý thế nào" không bị coi là rà SOP
+const DOCUMENT_WORDS = keywordRegex("sop|tài liệu|quy trình|quy định|chính sách|document|procedure|policy");
+
+// Ý so sánh chung chung: chỉ tính khi câu hỏi nêu từ 2 mã tài liệu trở lên
+const COMPARE_KEYWORDS = keywordRegex(
+  "so sánh|đối chiếu|giống nhau|khác nhau|khác gì|điểm chung|điểm khác|compare|comparison"
+);
+
+export function isOverlapQuestion(query: string): boolean {
+  const text = normalizeText(query);
+  return OVERLAP_KEYWORDS.test(text) && DOCUMENT_WORDS.test(text);
+}
+
+export function isCompareQuestion(query: string): boolean {
+  return COMPARE_KEYWORDS.test(normalizeText(query));
 }
 
 // ============== FOLLOW-UP QUERY REWRITE ==============
@@ -473,6 +498,130 @@ ${VOICE_RULES}
 
 ${FORMAT_RULES}
 ${buildCatalogSection(catalog)}${contextSection}`;
+}
+
+const OVERLAP_COMMON_RULES = `QUY TẮC:
+- CHỈ dựa trên các đoạn trích ở trên. KHÔNG bịa nội dung, không suy đoán phần tài liệu bạn không được thấy.
+- Giữ nguyên con số, đơn vị, mã tài liệu, tên thiết bị như trong đoạn trích. Khi nêu nội dung của tài liệu nào, ghi rõ TÊN FILE hoặc MÃ của tài liệu đó.
+- Hai đoạn được coi là CÙNG QUY ĐỊNH khi chúng điều chỉnh cùng một việc / chính sách, dù tên mục, cách diễn đạt hay ngôn ngữ (Việt - Anh) khác nhau.
+- BỎ QUA phần giống nhau chỉ vì cùng khuôn mẫu SOP (mục đích, phạm vi, định nghĩa, trách nhiệm chung, tài liệu tham khảo, lịch sử sửa đổi, bảng ký duyệt, tiêu đề). Không liệt kê những gì bị bỏ qua.
+- Phần đề xuất là GỢI Ý của bạn, không phải nội dung có trong SOP: luôn đặt dưới tiêu đề "Đề xuất" và nói rõ cần chủ quy trình / QA xem xét.
+- Trả lời bằng tiếng Việt.`;
+
+const OVERLAP_REPORT_FORMAT = `Với MỖI quy định trùng lặp, trình bày đúng các ý sau:
+- **Tên quy định** (bạn đặt tên ngắn gọn, vd "Chính sách mật khẩu")
+- Từng tài liệu quy định gì (nêu tên mục nếu thấy trong đoạn trích)
+- Điểm GIỐNG nhau
+- Điểm KHÁC nhau hoặc MÂU THUẪN cụ thể: con số, tần suất, thời hạn, người chịu trách nhiệm. Nếu nội dung như nhau thì nói rõ là không mâu thuẫn, chỉ lặp lại.
+- Đề xuất: nên giữ quy định đầy đủ ở tài liệu nào (tài liệu có chủ đề chính gần với quy định đó nhất) và lý do; tài liệu còn lại nên bỏ phần chi tiết, thay bằng một câu tham chiếu. Viết luôn câu tham chiếu gợi ý. Nếu hai bên đang mâu thuẫn, nêu rõ cần thống nhất giá trị nào trước khi gom.`;
+
+/** Prompt rà quy định trùng lặp từ các CẶP ĐOẠN gần nghĩa nhất giữa tài liệu A và B. */
+function buildOverlapPairsPrompt(ctx: OverlapContext): string {
+  const block = (tag: string, c: OverlapContext["pairs"][number]["a"]) =>
+    `[${tag}] File: ${c.fileName} | Phòng ban: ${c.category}\n${c.text}`;
+
+  const pairsText =
+    ctx.pairs.length > 0
+      ? ctx.pairs
+          .map((p, i) => `--- CẶP ${i + 1} ---\n${block("A", p.a)}\n\n${block("B", p.b)}`)
+          .join("\n\n")
+      : "(Không có cặp đoạn nào đủ gần nhau về nội dung.)";
+
+  return `Bạn là trợ lý rà soát tài liệu SOP của công ty dược. Nhiệm vụ: phát hiện QUY ĐỊNH TRÙNG LẶP giữa các SOP và đề xuất gom về một nơi để mỗi chính sách chỉ được quy định ở MỘT tài liệu.
+
+A = ${ctx.labelA}
+B = ${ctx.labelB}
+
+Dưới đây là các cặp đoạn có nội dung GẦN NHAU NHẤT về ngữ nghĩa giữa A và B. Máy tự ghép theo độ giống của nội dung, không theo tên mục, nên CHƯA CHẮC mỗi cặp đều là cùng một quy định.
+
+${pairsText}
+
+CÁCH LÀM:
+1. Xét từng cặp: hai đoạn có thật sự quy định về cùng một việc / chính sách không? Chỉ giữ những cặp thật sự trùng.
+2. Mở đầu câu trả lời bằng kết luận: tìm thấy bao nhiêu quy định trùng lặp giữa A và B (hoặc không tìm thấy).
+3. ${OVERLAP_REPORT_FORMAT}
+4. Nếu không có cặp nào thật sự trùng: nói rõ là không phát hiện quy định trùng lặp trong các đoạn đã đối chiếu.
+5. Kết thúc bằng MỘT câu lưu ý: kết quả dựa trên các đoạn gần nghĩa nhất do máy chọn, có thể chưa bao quát toàn bộ tài liệu.
+
+${OVERLAP_COMMON_RULES}
+
+${VOICE_RULES}
+
+${FORMAT_RULES}`;
+}
+
+/** Prompt rà một CHỦ ĐỀ đang được quy định ở những tài liệu nào. */
+function buildOverlapTopicPrompt(ctx: OverlapContext): string {
+  const groupsText = ctx.topicGroups
+    .map(
+      (g, i) =>
+        `=== TÀI LIỆU ${i + 1}: ${g.fileName} | Phòng ban: ${g.category} ===\n${g.chunks.map((c) => c.text).join("\n\n[...]\n\n")}`
+    )
+    .join("\n\n");
+
+  return `Bạn là trợ lý rà soát tài liệu SOP của công ty dược. Người dùng muốn biết một quy định / chính sách đang được viết ở NHỮNG tài liệu nào, có bị trùng lặp hay mâu thuẫn không, để gom về một nơi.
+
+Dưới đây là các đoạn liên quan nhất tới câu hỏi, gom theo từng tài liệu:
+
+${groupsText}
+
+CÁCH LÀM:
+1. Xác định chủ đề người dùng hỏi. Chỉ xét các tài liệu thật sự có quy định về chủ đề đó; bỏ qua tài liệu chỉ nhắc thoáng qua hoặc không liên quan.
+2. Mở đầu bằng kết luận: chủ đề này đang được quy định ở bao nhiêu tài liệu, là những tài liệu nào.
+3. ${OVERLAP_REPORT_FORMAT}
+4. Nếu chỉ MỘT tài liệu thật sự quy định chủ đề này: nói rõ là không thấy trùng lặp.
+5. Kết thúc bằng MỘT câu lưu ý: kết quả dựa trên các đoạn liên quan nhất do máy tìm được, có thể còn tài liệu khác chưa được xét.
+
+${OVERLAP_COMMON_RULES}
+
+${VOICE_RULES}
+
+${FORMAT_RULES}`;
+}
+
+/** Prompt cho kết quả QUÉT CẢ KHO: danh sách cặp tài liệu nghi trùng, để người dùng chọn cặp xem chi tiết. */
+function buildOverlapScanPrompt(ctx: OverlapContext): string {
+  const pairs = ctx.scanPairs ?? [];
+  const pairsText =
+    pairs.length > 0
+      ? pairs
+          .map((p, i) => {
+            const examples = p.examples
+              .map((e, k) => `  Ví dụ ${k + 1}:\n  - Trong A: ${e.a}\n  - Trong B: ${e.b}`)
+              .join("\n");
+            return `--- CẶP TÀI LIỆU ${i + 1} ---\nA: ${p.fileA} (Phòng ban: ${p.categoryA})\nB: ${p.fileB} (Phòng ban: ${p.categoryB})\nSố đoạn rất giống nhau: ${p.similarChunks}\n${examples}`;
+          })
+          .join("\n\n")
+      : "(Máy không tìm thấy cặp tài liệu nào có đoạn giống nhau ở mức cao.)";
+
+  return `Bạn là trợ lý rà soát tài liệu SOP của công ty dược. Người dùng hỏi chung: trong kho có SOP nào trùng lặp nội dung với SOP khác không.
+
+Máy đã QUÉT TỰ ĐỘNG ${ctx.scanScope} và xếp hạng các cặp tài liệu có nhiều đoạn giống nhau nhất. Chỉ xét SOP chính, không xét biểu mẫu và phụ lục. Đây là bước khoanh vùng theo độ giống của nội dung, CHƯA phải kết luận.
+
+${pairsText}
+
+CÁCH LÀM:
+1. Mở đầu: nói rõ phạm vi đã quét và có bao nhiêu cặp tài liệu NGHI trùng nội dung.
+2. Liệt kê từng cặp theo thứ tự trên: tên hai tài liệu, số đoạn rất giống nhau, và dựa vào ví dụ nêu ngắn gọn chúng có vẻ trùng nhau về VIỆC GÌ.
+3. Nếu ví dụ của một cặp chỉ là phần khuôn mẫu chung của SOP (mục đích, phạm vi, trách nhiệm chung, định nghĩa, tài liệu tham khảo...) thì nói rõ cặp đó nhiều khả năng chỉ giống về khuôn mẫu, không phải trùng quy định.
+4. Kết thúc bằng hướng dẫn bước tiếp theo: để xem chi tiết điểm giống, điểm khác và đề xuất gom, người dùng hỏi "so sánh [mã SOP thứ nhất] và [mã SOP thứ hai]" - viết sẵn một câu ví dụ với đúng mã của cặp đứng đầu.
+5. Nếu không có cặp nào: nói rõ lần quét này không thấy cặp tài liệu nào giống nhau ở mức cao, và gợi ý người dùng hỏi theo chủ đề cụ thể (ví dụ "chính sách mật khẩu được quy định ở những SOP nào").
+
+QUY TẮC:
+- CHỈ dựa trên danh sách trên. KHÔNG tự thêm cặp tài liệu, không bịa nội dung.
+- Dùng chữ "nghi trùng", "có vẻ": đây là kết quả quét tự động, không khẳng định chắc chắn.
+- Giữ nguyên tên file và mã tài liệu.
+- KHÔNG đề xuất gom ở bước này (chưa đủ thông tin); việc đó làm ở bước so sánh chi tiết.
+- Trả lời bằng tiếng Việt.
+
+${VOICE_RULES}
+
+${FORMAT_RULES}`;
+}
+
+export function buildOverlapSystemPrompt(ctx: OverlapContext): string {
+  if (ctx.mode === "scan") return buildOverlapScanPrompt(ctx);
+  return ctx.mode === "pairs" ? buildOverlapPairsPrompt(ctx) : buildOverlapTopicPrompt(ctx);
 }
 
 /** Gọi model router cho các tác vụ phân tích ngắn (trả JSON). Lỗi → chuỗi rỗng. */

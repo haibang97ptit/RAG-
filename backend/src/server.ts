@@ -24,12 +24,16 @@ import {
   buildFollowUpSystemPrompt,
   buildChitChatSystemPrompt,
   buildQualzenSystemPrompt,
+  buildOverlapSystemPrompt,
+  isOverlapQuestion,
+  isCompareQuestion,
   streamChatCompletion,
   type ChatMessage,
   type Intent,
 } from "./llmService.js";
 import { selectDisplayedSources, type UiSource } from "./citedSources.js";
 import { answerDataForQualzen, looksLikeQualzenQuestion } from "./qualzenAssistant.js";
+import { findOverlapContext, type OverlapContext } from "./overlapFinder.js";
 import {
   findCatalogForQuery,
   isMainDocument,
@@ -93,6 +97,8 @@ const MAX_UI_SOURCES = 5;
 const OVERVIEW_OPENING_RATIO = 0.6;
 // Câu trả lời từ QualZen có thể là danh sách dài ("liệt kê hết")
 const QUALZEN_MAX_ANSWER_TOKENS = 6000;
+// Báo cáo rà trùng lặp giữa các SOP dài hơn câu trả lời tra cứu thông thường
+const OVERLAP_MAX_ANSWER_TOKENS = 4000;
 const MAX_QUERY_CHARS = 4000;
 const MAX_HISTORY_CONTENT_CHARS = 8000;
 
@@ -277,6 +283,23 @@ fastify.get("/stats", async () => {
 });
 
 /**
+ * Câu hỏi rà quy định trùng lặp / so sánh giữa các SOP → các cặp đoạn gần nghĩa nhất để LLM phân tích.
+ * Trả về null nếu không phải dạng câu hỏi này (đi tiếp luồng tìm kiếm thông thường).
+ */
+async function overlapContextFor(query: string, catalog: CatalogMatch | null): Promise<OverlapContext | null> {
+  const wantsOverlap = isOverlapQuestion(query);
+  const wantsCompare = isCompareQuestion(query);
+  if (!wantsOverlap && !wantsCompare) return null;
+
+  try {
+    return await findOverlapContext(query, catalog, wantsCompare, wantsOverlap);
+  } catch (err) {
+    fastify.log.warn(`Overlap analysis failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/**
  * Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) → system prompt chứa dữ liệu truy vấn được.
  * Trả về null nếu tính năng tắt hoặc câu hỏi là về tài liệu SOP (đi tiếp luồng RAG bình thường).
  */
@@ -320,19 +343,24 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     }
   } else {
     let sysPrompt = await qualzenPromptFor(query, limitedHistory);
-    const maxTokens = sysPrompt ? QUALZEN_MAX_ANSWER_TOKENS : undefined;
+    let maxTokens = sysPrompt ? QUALZEN_MAX_ANSWER_TOKENS : undefined;
 
     if (!sysPrompt) {
       const complexity = classifyComplexity(query);
       const searchQuery =
         intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
       const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
-      const { reranked } = await enhancedRetrieve(
-        searchQuery,
-        complexity,
-        focusPathsOf(catalog),
-        overviewPathsOf(searchQuery, catalog)
-      );
+      const overlap = await overlapContextFor(searchQuery, catalog);
+      const reranked = overlap
+        ? overlap.chunks
+        : (
+            await enhancedRetrieve(
+              searchQuery,
+              complexity,
+              focusPathsOf(catalog),
+              overviewPathsOf(searchQuery, catalog)
+            )
+          ).reranked;
 
       sources = reranked.map((r) => ({
         fileName: r.fileName,
@@ -342,10 +370,15 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
       }));
 
       const useCoT = complexity === "complex";
-      sysPrompt =
-        intent === "FOLLOW_UP"
-          ? buildFollowUpSystemPrompt(reranked, catalog)
-          : buildSOPSystemPrompt(reranked, useCoT, catalog);
+      if (overlap) {
+        sysPrompt = buildOverlapSystemPrompt(overlap);
+        maxTokens = OVERLAP_MAX_ANSWER_TOKENS;
+      } else {
+        sysPrompt =
+          intent === "FOLLOW_UP"
+            ? buildFollowUpSystemPrompt(reranked, catalog)
+            : buildSOPSystemPrompt(reranked, useCoT, catalog);
+      }
     }
 
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
@@ -391,6 +424,7 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     send("intent", { intent });
 
     let sysPrompt: string;
+    let maxTokens: number | undefined;
     // Mọi file có đoạn trích đưa vào prompt (không trùng), theo thứ tự ưu tiên
     const retrievedSources: UiSource[] = [];
 
@@ -403,6 +437,7 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
       send("sources", { sources: [] });
     } else if (qualzenPrompt) {
       sysPrompt = qualzenPrompt;
+      maxTokens = QUALZEN_MAX_ANSWER_TOKENS;
       send("sources", { sources: [] });
     } else {
       // 1. Classify complexity
@@ -417,12 +452,17 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
       // Tra danh mục file theo mã tài liệu trong câu hỏi: dùng cho câu hỏi đếm/liệt kê,
       // và để ưu tiên tìm trong đúng các file của tài liệu được nhắc tới
       const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
-      const { reranked, stats } = await enhancedRetrieve(
-        searchQuery,
-        complexity,
-        focusPathsOf(catalog),
-        overviewPathsOf(searchQuery, catalog)
-      );
+
+      // Câu hỏi rà quy định trùng lặp / so sánh giữa các SOP: ghép các đoạn gần nghĩa nhất thay cho tìm kiếm thường
+      const overlap = await overlapContextFor(searchQuery, catalog);
+      const { reranked, stats } = overlap
+        ? { reranked: overlap.chunks, stats: overlap.stats }
+        : await enhancedRetrieve(
+            searchQuery,
+            complexity,
+            focusPathsOf(catalog),
+            overviewPathsOf(searchQuery, catalog)
+          );
       fastify.log.info(
         { query, searchQuery, intent, complexity, catalog_files: catalog?.total ?? 0, ...stats },
         "retrieval_stats"
@@ -448,16 +488,20 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
 
       // 5. Build prompt (CoT khi complex, SOP vs FOLLOW_UP vs CHITCHAT)
       const useCoT = complexity === "complex";
-      sysPrompt =
-        intent === "FOLLOW_UP"
-          ? buildFollowUpSystemPrompt(reranked, catalog)
-          : buildSOPSystemPrompt(reranked, useCoT, catalog);
+      if (overlap) {
+        sysPrompt = buildOverlapSystemPrompt(overlap);
+        maxTokens = OVERLAP_MAX_ANSWER_TOKENS;
+      } else {
+        sysPrompt =
+          intent === "FOLLOW_UP"
+            ? buildFollowUpSystemPrompt(reranked, catalog)
+            : buildSOPSystemPrompt(reranked, useCoT, catalog);
+      }
     }
 
     // 6. Stream LLM response
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     let answer = "";
-    const maxTokens = qualzenPrompt ? QUALZEN_MAX_ANSWER_TOKENS : undefined;
     for await (const delta of streamChatCompletion(sysPrompt, messages, maxTokens)) {
       answer += delta;
       send("chunk", { delta });

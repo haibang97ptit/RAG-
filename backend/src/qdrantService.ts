@@ -189,19 +189,23 @@ export interface SearchResult {
 }
 
 // onlyFilePaths: chỉ tìm trong các file này (dùng khi câu hỏi nhắc đích danh mã tài liệu)
+// excludeFilePaths: bỏ qua các file này (dùng khi tìm nội dung trùng ở các tài liệu KHÁC)
 export async function searchSimilar(
   queryVector: number[],
   topK: number,
-  onlyFilePaths?: string[]
+  onlyFilePaths?: string[],
+  excludeFilePaths?: string[]
 ): Promise<SearchResult[]> {
+  const filter: Record<string, unknown> = {};
+  if (onlyFilePaths?.length) filter.must = [{ key: "filePath", match: { any: onlyFilePaths } }];
+  if (excludeFilePaths?.length) filter.must_not = [{ key: "filePath", match: { any: excludeFilePaths } }];
+
   const c = getQdrantClient();
   const response = await c.query(config.collectionName, {
     query: queryVector,
     limit: topK,
     with_payload: true,
-    ...(onlyFilePaths && onlyFilePaths.length > 0
-      ? { filter: { must: [{ key: "filePath", match: { any: onlyFilePaths } }] } }
-      : {}),
+    ...(Object.keys(filter).length > 0 ? { filter } : {}),
   });
 
   return response.points.map((r) => {
@@ -216,6 +220,93 @@ export async function searchSimilar(
       sheetName: payload.sheetName,
     };
   });
+}
+
+export interface ChunkWithVector extends SearchResult {
+  chunkIndex: number;
+  vector: number[];
+}
+
+export interface CorpusChunk {
+  text: string;
+  fileName: string;
+  filePath: string;
+  category: string;
+  chunkIndex: number;
+  vector: Float32Array;
+}
+
+/** Toàn bộ chunk của kho kèm vector (dùng cho việc quét trùng lặp giữa mọi tài liệu). */
+export async function fetchAllChunksWithVectors(maxChunks: number): Promise<CorpusChunk[]> {
+  const c = getQdrantClient();
+  const chunks: CorpusChunk[] = [];
+  let offset: any = undefined;
+  do {
+    const result: any = await c.scroll(config.collectionName, {
+      limit: 500,
+      with_payload: ["text", "fileName", "filePath", "category", "chunkIndex"],
+      with_vector: true,
+      offset,
+    });
+    for (const point of result.points) {
+      const payload = point.payload as any;
+      if (!payload?.filePath) continue;
+      chunks.push({
+        text: payload.text,
+        fileName: payload.fileName,
+        filePath: payload.filePath,
+        category: payload.category || "Chung",
+        chunkIndex: payload.chunkIndex ?? 0,
+        vector: Float32Array.from(point.vector as number[]),
+      });
+    }
+    offset = result.next_page_offset;
+  } while (offset !== null && offset !== undefined && chunks.length < maxChunks);
+  return chunks.slice(0, maxChunks);
+}
+
+/** Toàn bộ chunk (kèm vector) của các file, theo thứ tự trong tài liệu. Dùng để so khớp nội dung giữa 2 tài liệu. */
+export async function fetchFileChunksWithVectors(
+  filePaths: string[],
+  maxChunks: number = 400
+): Promise<ChunkWithVector[]> {
+  if (filePaths.length === 0) return [];
+
+  const c = getQdrantClient();
+  const chunks: ChunkWithVector[] = [];
+  let offset: any = undefined;
+  do {
+    const result: any = await c.scroll(config.collectionName, {
+      limit: 200,
+      with_payload: true,
+      with_vector: true,
+      filter: { must: [{ key: "filePath", match: { any: filePaths } }] },
+      offset,
+    });
+    for (const point of result.points) {
+      const payload = point.payload as any;
+      chunks.push({
+        score: 1,
+        text: payload.text,
+        fileName: payload.fileName,
+        filePath: payload.filePath,
+        category: payload.category,
+        fileType: payload.fileType,
+        sheetName: payload.sheetName,
+        chunkIndex: payload.chunkIndex ?? 0,
+        vector: point.vector as number[],
+      });
+    }
+    offset = result.next_page_offset;
+  } while (offset !== null && offset !== undefined && chunks.length < maxChunks);
+
+  const fileOrder = new Map(filePaths.map((p, i) => [p, i]));
+  return chunks
+    .slice(0, maxChunks)
+    .sort(
+      (a, b) =>
+        (fileOrder.get(a.filePath) ?? 0) - (fileOrder.get(b.filePath) ?? 0) || a.chunkIndex - b.chunkIndex
+    );
 }
 
 /**
