@@ -91,6 +91,8 @@ interface QueryBody {
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_UI_SOURCES = 5;
 const OVERVIEW_OPENING_RATIO = 0.6;
+// Câu trả lời từ QualZen có thể là danh sách dài ("liệt kê hết")
+const QUALZEN_MAX_ANSWER_TOKENS = 6000;
 const MAX_QUERY_CHARS = 4000;
 const MAX_HISTORY_CONTENT_CHARS = 8000;
 
@@ -318,6 +320,7 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     }
   } else {
     let sysPrompt = await qualzenPromptFor(query, limitedHistory);
+    const maxTokens = sysPrompt ? QUALZEN_MAX_ANSWER_TOKENS : undefined;
 
     if (!sysPrompt) {
       const complexity = classifyComplexity(query);
@@ -346,7 +349,7 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     }
 
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
-    for await (const delta of streamChatCompletion(sysPrompt, messages)) {
+    for await (const delta of streamChatCompletion(sysPrompt, messages, maxTokens)) {
       answer += delta;
     }
   }
@@ -454,7 +457,8 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     // 6. Stream LLM response
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     let answer = "";
-    for await (const delta of streamChatCompletion(sysPrompt, messages)) {
+    const maxTokens = qualzenPrompt ? QUALZEN_MAX_ANSWER_TOKENS : undefined;
+    for await (const delta of streamChatCompletion(sysPrompt, messages, maxTokens)) {
       answer += delta;
       send("chunk", { delta });
     }

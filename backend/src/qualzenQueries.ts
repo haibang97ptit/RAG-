@@ -24,6 +24,14 @@ const AI_BASED_ON_CAPA = 5;
 
 const VN_OFFSET_HOURS = 7;
 const LIST_TEXT_CHARS = 300;
+
+/** Số phiếu tối đa mỗi lần liệt kê, và khi người dùng yêu cầu "liệt kê hết". */
+export const DEFAULT_LIST_LIMIT = 20;
+export const FULL_LIST_LIMIT = 100;
+/** Liệt kê hết thì mỗi phiếu chỉ giữ nội dung ngắn, để câu trả lời không quá dài. */
+export const COMPACT_TEXT_CHARS = 110;
+
+export type DateField = "created" | "target" | "closed";
 const DETAIL_TEXT_CHARS = 1500;
 
 // ============== Tiện ích ==============
@@ -193,7 +201,15 @@ export interface ActionItemFilters {
   keyword?: string | null; // từ khóa trong nội dung
   createdFrom?: string | null; // YYYY-MM-DD
   createdTo?: string | null;
+  // Khoảng ngày ở trên áp vào: ngày tạo (mặc định), hạn hoàn thành, hoặc ngày đóng
+  dateField?: DateField | null;
 }
+
+const ACTION_ITEM_DATE_COLUMNS: Record<DateField, string> = {
+  created: "a.CreatedDate",
+  target: "a.TargetDate",
+  closed: "a.ClosureDate",
+};
 
 const ACTION_ITEM_FROM = `
 FROM QualZen_ActionPlan.ActionPlanMaster a
@@ -267,7 +283,7 @@ function actionItemWhere(request: sql.Request, f: ActionItemFilters): Where {
   if (f.keyword?.trim()) {
     where.add(`a.ActionPlanDescription LIKE ${where.param(sql.NVarChar, likePattern(f.keyword.trim()))}`);
   }
-  where.dateRange("a.CreatedDate", f.createdFrom, f.createdTo);
+  where.dateRange(ACTION_ITEM_DATE_COLUMNS[f.dateField ?? "created"], f.createdFrom, f.createdTo);
   return where;
 }
 
@@ -308,7 +324,12 @@ function mapActionItem(row: any, textChars: number) {
   };
 }
 
-export async function searchActionItems(pool: sql.ConnectionPool, filters: ActionItemFilters, limit = 20) {
+export async function searchActionItems(
+  pool: sql.ConnectionPool,
+  filters: ActionItemFilters,
+  limit = DEFAULT_LIST_LIMIT,
+  textChars = LIST_TEXT_CHARS
+) {
   const countRequest = pool.request();
   const countWhere = actionItemWhere(countRequest, filters);
   const summary = (
@@ -352,7 +373,7 @@ export async function searchActionItems(pool: sql.ConnectionPool, filters: Actio
       dangMoChuaCoHan: summary.openNoTarget ?? 0,
     },
     soDongHienThi: rows.length,
-    danhSach: rows.map((row: any) => mapActionItem(row, LIST_TEXT_CHARS)),
+    danhSach: rows.map((row: any) => mapActionItem(row, textChars)),
     _rows: rows,
   };
 }
@@ -444,7 +465,12 @@ function mapCcn(row: any, textChars: number) {
   };
 }
 
-export async function searchCcns(pool: sql.ConnectionPool, filters: CcnFilters, limit = 15) {
+export async function searchCcns(
+  pool: sql.ConnectionPool,
+  filters: CcnFilters,
+  limit = DEFAULT_LIST_LIMIT,
+  textChars = LIST_TEXT_CHARS
+) {
   const countRequest = pool.request();
   const total = (await countRequest.query(`SELECT COUNT(*) AS total ${CCN_FROM} ${ccnWhere(countRequest, filters)}`))
     .recordset[0].total as number;
@@ -468,7 +494,7 @@ export async function searchCcns(pool: sql.ConnectionPool, filters: CcnFilters, 
       ORDER BY c.CCN_Date DESC`)
   ).recordset;
 
-  return { tongSo: total, soDongHienThi: rows.length, danhSach: rows.map((r: any) => mapCcn(r, LIST_TEXT_CHARS)), _rows: rows };
+  return { tongSo: total, soDongHienThi: rows.length, danhSach: rows.map((r: any) => mapCcn(r, textChars)), _rows: rows };
 }
 
 export async function getCcnDetail(pool: sql.ConnectionPool, row: any) {
@@ -555,7 +581,12 @@ function mapCapa(row: any, textChars: number) {
   };
 }
 
-export async function searchCapas(pool: sql.ConnectionPool, filters: CapaFilters, limit = 15) {
+export async function searchCapas(
+  pool: sql.ConnectionPool,
+  filters: CapaFilters,
+  limit = DEFAULT_LIST_LIMIT,
+  textChars = LIST_TEXT_CHARS
+) {
   const countRequest = pool.request();
   const total = (
     await countRequest.query(`SELECT COUNT(DISTINCT p.CAPAID) AS total ${CAPA_FROM} ${capaWhere(countRequest, filters)}`)
@@ -580,7 +611,7 @@ export async function searchCapas(pool: sql.ConnectionPool, filters: CapaFilters
       ORDER BY p.CAPA_Date DESC`)
   ).recordset;
 
-  return { tongSo: total, soDongHienThi: rows.length, danhSach: rows.map((r: any) => mapCapa(r, LIST_TEXT_CHARS)), _rows: rows };
+  return { tongSo: total, soDongHienThi: rows.length, danhSach: rows.map((r: any) => mapCapa(r, textChars)), _rows: rows };
 }
 
 export async function getCapaDetail(pool: sql.ConnectionPool, row: any) {

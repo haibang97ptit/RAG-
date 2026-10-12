@@ -1,7 +1,10 @@
 import { callRouter, type ChatMessage } from "./llmService.js";
 import { getQualzenPool } from "./qualzenDb.js";
 import {
+  COMPACT_TEXT_CHARS,
+  DEFAULT_LIST_LIMIT,
   DEPT_CODES,
+  FULL_LIST_LIMIT,
   formatDate,
   getActionItemDetail,
   getCapaDetail,
@@ -10,6 +13,7 @@ import {
   searchCapas,
   searchCcns,
   type ActionItemStatus,
+  type DateField,
 } from "./qualzenQueries.js";
 
 /**
@@ -31,6 +35,8 @@ export interface QualzenPlan {
   keyword: string | null;
   fromDate: string | null;
   toDate: string | null;
+  dateField: DateField | null;
+  listAll: boolean;
 }
 
 // Mã phiếu đầy đủ: AI/FRM/QC/2026/1139, PCC/FRM/IT/2026/009, CAPA/FRM/QC/2026/136
@@ -71,6 +77,8 @@ const emptyPlan = (module: Module): QualzenPlan => ({
   keyword: null,
   fromDate: null,
   toDate: null,
+  dateField: null,
+  listAll: false,
 });
 
 const PLANNER_PROMPT = `Bạn phân tích câu hỏi cho trợ lý nội bộ của công ty dược. Có 2 nguồn trả lời:
@@ -79,7 +87,7 @@ const PLANNER_PROMPT = `Bạn phân tích câu hỏi cho trợ lý nội bộ c�
 Nếu không chắc → "sop".
 
 Trả về DUY NHẤT một JSON, không giải thích:
-{"source":"qualzen|sop","module":"action_item|ccn|capa","number":null,"source_number":null,"source_type":null,"department":null,"status":null,"person":null,"keyword":null,"from_date":null,"to_date":null}
+{"source":"qualzen|sop","module":"action_item|ccn|capa","number":null,"source_number":null,"source_type":null,"department":null,"status":null,"person":null,"keyword":null,"from_date":null,"to_date":null,"date_field":null,"list_all":false}
 
 Ý nghĩa các trường (để null nếu câu hỏi không nhắc tới):
 - module: loại phiếu người dùng muốn XEM. "action item của CCN 009" → action_item; "CCN 009 đang ở bước nào" → ccn.
@@ -89,7 +97,9 @@ Trả về DUY NHẤT một JSON, không giải thích:
 - status (chỉ cho action_item): open (chưa đóng), closed (đã đóng), overdue (quá hạn), pending_responsible (chờ người phụ trách thực hiện), pending_hod (chờ trưởng bộ phận review), pending_qa (chờ QA duyệt), draft (nháp).
 - person: tên người phụ trách (action item) hoặc người khởi tạo (CCN).
 - keyword: CHỈ khi người dùng muốn tìm theo nội dung; 1-3 từ lấy nguyên từ câu hỏi. Không đưa các từ chung như "action item", "CCN", "phiếu".
-- from_date, to_date: khoảng NGÀY TẠO, định dạng YYYY-MM-DD, tính từ ngày hôm nay được cho bên dưới.`;
+- from_date, to_date: khoảng ngày, định dạng YYYY-MM-DD, tính từ ngày hôm nay được cho bên dưới. Một ngày cụ thể → from_date = to_date. "tháng 9" → từ ngày 01 đến ngày cuối tháng 9 của năm nay.
+- date_field: khoảng ngày trên áp vào ngày nào: "created" (ngày tạo - mặc định), "target" (hạn hoàn thành, vd "đến hạn trong tuần này", "hạn trước 20/10"), "closed" (ngày đóng, vd "đã đóng trong tháng 9"). target/closed chỉ dùng cho action_item.
+- list_all: true khi người dùng muốn xem HẾT danh sách ("liệt kê hết", "tất cả", "toàn bộ", "đầy đủ", "xem tiếp phần còn lại"). Mặc định false.`;
 
 function parsePlan(raw: string): QualzenPlan | "sop" | null {
   const match = raw.match(/\{[\s\S]*\}/);
@@ -106,6 +116,7 @@ function parsePlan(raw: string): QualzenPlan | "sop" | null {
   const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 100) : null);
   const date = (value: unknown) => (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null);
   const department = text(json.department)?.toUpperCase() ?? null;
+  const dateField = ["created", "target", "closed"].includes(json.date_field) ? (json.date_field as DateField) : null;
   const sourceType = text(json.source_type)?.toUpperCase() ?? null;
 
   return {
@@ -119,6 +130,8 @@ function parsePlan(raw: string): QualzenPlan | "sop" | null {
     keyword: text(json.keyword),
     fromDate: date(json.from_date),
     toDate: date(json.to_date),
+    dateField,
+    listAll: json.list_all === true,
   };
 }
 
@@ -154,14 +167,20 @@ function describeFilters(plan: QualzenPlan): Record<string, string> {
   if (plan.status) filters.trangThai = plan.status;
   if (plan.person) filters.nguoi = plan.person;
   if (plan.keyword) filters.tuKhoa = plan.keyword;
-  if (plan.fromDate) filters.taoTuNgay = plan.fromDate;
-  if (plan.toDate) filters.taoDenNgay = plan.toDate;
+  const dateLabel = { created: "ngày tạo", target: "hạn hoàn thành", closed: "ngày đóng" }[plan.dateField ?? "created"];
+  if (plan.fromDate || plan.toDate) {
+    filters.khoangNgay = `${dateLabel} từ ${plan.fromDate ?? "…"} đến ${plan.toDate ?? "…"}`;
+  }
+  if (plan.listAll) filters.lietKeHet = `có (tối đa ${FULL_LIST_LIMIT} phiếu)`;
   return filters;
 }
 
 async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
   const pool = await getQualzenPool();
   const dates = { createdFrom: plan.fromDate, createdTo: plan.toDate };
+  // "Liệt kê hết": lấy nhiều phiếu hơn nhưng mỗi phiếu gọn lại
+  const limit = plan.listAll ? FULL_LIST_LIMIT : DEFAULT_LIST_LIMIT;
+  const textChars = plan.listAll ? COMPACT_TEXT_CHARS : undefined;
 
   if (plan.module === "action_item") {
     const result = await searchActionItems(pool, {
@@ -173,7 +192,8 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
       person: plan.person,
       keyword: plan.keyword,
       ...dates,
-    });
+      dateField: plan.dateField,
+    }, limit, textChars);
     const { _rows, ...listing } = result;
     if (_rows.length === 1) {
       return { loaiPhieu: "Action Item", tongSo: 1, chiTiet: await getActionItemDetail(pool, _rows[0]) };
@@ -188,7 +208,7 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
       person: plan.person,
       keyword: plan.keyword,
       ...dates,
-    });
+    }, limit, textChars);
     const { _rows, ...listing } = result;
     if (_rows.length === 1) {
       return { loaiPhieu: "CCN (Change Control)", tongSo: 1, chiTiet: await getCcnDetail(pool, _rows[0]) };
@@ -196,7 +216,7 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
     return { loaiPhieu: "CCN (Change Control)", ...listing };
   }
 
-  const result = await searchCapas(pool, { number: plan.number, keyword: plan.keyword, ...dates });
+  const result = await searchCapas(pool, { number: plan.number, keyword: plan.keyword, ...dates }, limit, textChars);
   const { _rows, ...listing } = result;
   if (_rows.length === 1) {
     return { loaiPhieu: "CAPA", tongSo: 1, chiTiet: await getCapaDetail(pool, _rows[0]) };

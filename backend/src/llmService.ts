@@ -508,8 +508,8 @@ ${dataJson}
 QUY TẮC:
 1. CHỈ trả lời dựa trên DỮ LIỆU QUALZEN ở trên. KHÔNG bịa mã phiếu, tên người, ngày tháng, trạng thái.
 2. Nếu "tongSo" là 0: nói bạn không tìm thấy phiếu nào khớp, nhắc lại điều kiện đã tìm (trong "dieuKienLoc") và gợi ý người dùng kiểm tra lại mã hoặc điều kiện.
-3. Nếu "tongSo" lớn hơn "soDongHienThi": nói rõ tổng số, cho biết bạn chỉ liệt kê được số phiếu trong "soDongHienThi" và gợi ý thu hẹp điều kiện (phòng ban, trạng thái, thời gian).
-4. Câu hỏi đếm / thống kê: trả lời bằng con số trong "tongSo" và "thongKe", không tự đếm lại từ danh sách.
+3. Nếu "tongSo" lớn hơn "soDongHienThi": nói rõ tổng số và cho biết bạn mới liệt kê bao nhiêu phiếu đầu. Gợi ý người dùng nói "liệt kê hết" để xem toàn bộ, hoặc thu hẹp theo phòng ban, trạng thái, thời gian. Không nhắc tới "giới hạn hiển thị" hay tên trường dữ liệu.
+4. Khi có nhiều phiếu, MỞ ĐẦU bằng tổng số kèm thống kê trong "thongKe" (bao nhiêu đang mở, đã đóng, quá hạn...). Câu hỏi đếm / thống kê: trả lời bằng các con số này, không tự đếm lại từ danh sách.
 5. Câu hỏi "đang ở bước nào / chờ ai": dùng "trangThai", "buocHienTai" và "dangChoAi". Nếu "dangChoAi" trống thì nói theo "buocHienTai", không đoán tên người.
 6. Giữ nguyên mã phiếu và nội dung gốc (phần lớn bằng tiếng Anh); có thể diễn giải ngắn bằng tiếng Việt nhưng không dịch sai nghĩa.
 7. Ngày giờ ghi đúng như trong dữ liệu (dd/mm/yyyy). Phiếu có "quaHan": true thì nêu rõ là đã quá hạn.
@@ -520,7 +520,8 @@ ${VOICE_RULES}
 
 ${FORMAT_RULES}
 - Một phiếu: trình bày các thông tin chính bằng gạch đầu dòng (mã, nội dung, phòng ban, trạng thái, hạn, người phụ trách...), lịch sử xử lý theo thứ tự thời gian
-- Nhiều phiếu: mỗi phiếu một gạch đầu dòng, bắt đầu bằng mã phiếu in đậm, kèm nội dung tóm tắt, trạng thái và hạn`;
+- Từ 2 đến 8 phiếu: mỗi phiếu một gạch đầu dòng, bắt đầu bằng mã phiếu in đậm, kèm nội dung tóm tắt, trạng thái, hạn, người phụ trách
+- Hơn 8 phiếu: mỗi phiếu ĐÚNG MỘT dòng ngắn, không có gạch đầu dòng con: **mã phiếu** - nội dung rút gọn - hạn - người phụ trách (thêm "QUÁ HẠN" nếu quá hạn). Liệt kê ĐỦ mọi phiếu có trong dữ liệu, không bỏ bớt, không viết "..."`;
 }
 
 export function buildChitChatSystemPrompt(): string {
@@ -538,7 +539,8 @@ Người dùng đang chào hỏi, cảm ơn, hỏi về bạn hoặc nói chuy�
 
 export async function* streamChatCompletion(
   systemPrompt: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  maxTokens: number = 2048
 ): AsyncGenerator<string, void, unknown> {
   const chatMessages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
@@ -549,7 +551,7 @@ export async function* streamChatCompletion(
     model: config.llmModel,
     messages: chatMessages as any,
     temperature: 0.3,
-    max_tokens: 2048,
+    max_tokens: maxTokens,
     stream: true,
   });
 
