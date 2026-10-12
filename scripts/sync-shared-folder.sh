@@ -21,12 +21,14 @@ mkdir -p "$TARGET"
 
 echo "$LOG_PREFIX $(date -Iseconds) Bắt đầu sync $SOURCE → $TARGET"
 
-rsync -av --delete \
+# rsync áp dụng rule ĐẦU TIÊN khớp, nên exclude file khóa tạm của Office (~$xxx.docx)
+# phải đứng trước include '*.docx'. --delete-excluded để dọn các file đó đã lỡ sync trước đây.
+rsync -av --delete --delete-excluded \
+    --exclude='.DS_Store' --exclude='Thumbs.db' --exclude='~$*' \
     --include='*/' \
     --include='*.pdf' --include='*.docx' --include='*.doc' \
     --include='*.xlsx' --include='*.xls' \
     --include='*.txt' --include='*.md' \
-    --exclude='.DS_Store' --exclude='Thumbs.db' --exclude='~$*' \
     --exclude='*' \
     "$SOURCE/" "$TARGET/" \
     --log-file=/var/log/sop-rsync.log

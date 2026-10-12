@@ -110,23 +110,45 @@ export async function deleteByFilePath(filePath: string): Promise<void> {
   });
 }
 
-// Scroll toàn bộ collection, chỉ lấy 1 field payload (không kéo text về)
-async function scrollPayloadField(field: string, onValue: (value: any) => void): Promise<void> {
+// Scroll toàn bộ collection, chỉ lấy các field payload cần dùng (không kéo text về)
+async function scrollPayload(fields: string[], onPayload: (payload: any) => void): Promise<void> {
   const c = getQdrantClient();
   let offset: any = undefined;
   do {
     const result: any = await c.scroll(config.collectionName, {
       limit: 1000,
-      with_payload: [field],
+      with_payload: fields,
       with_vector: false,
       offset,
     });
 
     for (const point of result.points) {
-      onValue((point.payload as any)?.[field]);
+      onPayload(point.payload || {});
     }
     offset = result.next_page_offset;
   } while (offset !== null && offset !== undefined);
+}
+
+async function scrollPayloadField(field: string, onValue: (value: any) => void): Promise<void> {
+  await scrollPayload([field], (payload) => onValue(payload[field]));
+}
+
+export interface IndexedFile {
+  fileName: string;
+  category: string;
+}
+
+// Danh sách file đã index (mỗi file 1 dòng, kèm phòng ban). Throw khi lỗi.
+export async function listIndexedFileEntries(): Promise<IndexedFile[]> {
+  const byPath = new Map<string, IndexedFile>();
+  await scrollPayload(["filePath", "fileName", "category"], (payload) => {
+    if (!payload.fileName) return;
+    const key = payload.filePath || payload.fileName;
+    if (!byPath.has(key)) {
+      byPath.set(key, { fileName: payload.fileName, category: payload.category || "Chung" });
+    }
+  });
+  return Array.from(byPath.values());
 }
 
 export async function listIndexedFiles(): Promise<string[]> {

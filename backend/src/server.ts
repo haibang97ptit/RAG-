@@ -25,6 +25,7 @@ import {
   type ChatMessage,
   type Intent,
 } from "./llmService.js";
+import { findCatalogForQuery } from "./fileCatalog.js";
 
 const fastify = Fastify({
   logger: {
@@ -226,7 +227,10 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     const complexity = classifyComplexity(query);
     const searchQuery =
       intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
-    const { reranked } = await enhancedRetrieve(searchQuery, complexity);
+    const [{ reranked }, catalog] = await Promise.all([
+      enhancedRetrieve(searchQuery, complexity),
+      findCatalogForQuery(`${query} ${searchQuery}`),
+    ]);
 
     sources = reranked.map((r) => ({
       fileName: r.fileName,
@@ -238,8 +242,8 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     const useCoT = complexity === "complex";
     const sysPrompt =
       intent === "FOLLOW_UP"
-        ? buildFollowUpSystemPrompt(reranked)
-        : buildSOPSystemPrompt(reranked, useCoT);
+        ? buildFollowUpSystemPrompt(reranked, catalog)
+        : buildSOPSystemPrompt(reranked, useCoT, catalog);
 
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
@@ -299,8 +303,15 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
         intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
 
       // 3. Enhanced retrieve (HyDE + Query Expansion + Rerank)
-      const { reranked, stats } = await enhancedRetrieve(searchQuery, complexity);
-      fastify.log.info({ query, searchQuery, intent, complexity, ...stats }, "retrieval_stats");
+      // Song song: tra danh mục file theo mã tài liệu trong câu hỏi (cho câu hỏi đếm/liệt kê)
+      const [{ reranked, stats }, catalog] = await Promise.all([
+        enhancedRetrieve(searchQuery, complexity),
+        findCatalogForQuery(`${query} ${searchQuery}`),
+      ]);
+      fastify.log.info(
+        { query, searchQuery, intent, complexity, catalog_files: catalog?.total ?? 0, ...stats },
+        "retrieval_stats"
+      );
 
       // 4. Dedupe sources UI: top MAX_UI_SOURCES unique files
       const seenFiles = new Set<string>();
@@ -323,8 +334,8 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
       const useCoT = complexity === "complex";
       sysPrompt =
         intent === "FOLLOW_UP"
-          ? buildFollowUpSystemPrompt(reranked)
-          : buildSOPSystemPrompt(reranked, useCoT);
+          ? buildFollowUpSystemPrompt(reranked, catalog)
+          : buildSOPSystemPrompt(reranked, useCoT, catalog);
     }
 
     // 6. Stream LLM response

@@ -225,6 +225,9 @@ export async function walkDirectory(dir: string): Promise<string[]> {
       const fullPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         await walk(fullPath);
+      } else if (entry.name.startsWith("~$")) {
+        // File khóa tạm của Word/Excel (tạo ra khi có người đang mở tài liệu) - không phải tài liệu thật
+        continue;
       } else if (allowedExts.has(path.extname(entry.name).toLowerCase())) {
         files.push(fullPath);
       }

@@ -1,6 +1,7 @@
 import Groq from "groq-sdk";
 import { config } from "./config.js";
 import type { SearchResult } from "./qdrantService.js";
+import type { CatalogMatch } from "./fileCatalog.js";
 
 let groqClient: Groq | null = null;
 
@@ -319,7 +320,35 @@ Ví dụ output: [3, 7, 1, 12, 5]`;
 
 // ============== PROMPT BUILDERS ==============
 
-export function buildSOPSystemPrompt(contextChunks: SearchResult[], useCoT: boolean = false): string {
+/**
+ * Danh sách tên file có mã khớp với câu hỏi. Đoạn trích chỉ là vài phần giống câu hỏi nhất,
+ * nên muốn đếm/liệt kê tài liệu thì LLM phải dựa vào danh sách này.
+ */
+function buildCatalogSection(catalog: CatalogMatch | null): string {
+  if (!catalog) return "";
+
+  const lines = catalog.files.map((f) => `- ${f.fileName} (Phòng ban: ${f.category})`).join("\n");
+  const truncated =
+    catalog.total > catalog.files.length
+      ? `\n(Chỉ hiển thị ${catalog.files.length}/${catalog.total} file - khi trả lời phải nói rõ tổng số là ${catalog.total} và danh sách chưa đầy đủ)`
+      : "";
+
+  return `
+DANH MỤC FILE có mã khớp với câu hỏi - ${catalog.total} file, lấy từ TÊN FILE trong hệ thống:
+${lines}${truncated}
+
+CÁCH DÙNG DANH MỤC FILE:
+- Khi user hỏi CÓ BAO NHIÊU / LIỆT KÊ tài liệu, biểu mẫu, phụ lục của một SOP: đếm và liệt kê theo DANH MỤC FILE này. KHÔNG đếm theo số đoạn trích bên dưới - đoạn trích chỉ là một phần nhỏ.
+- Phân nhóm theo ký hiệu trong tên file nếu có (ví dụ -F01 = Form/biểu mẫu, -A01 = Appendix/phụ lục, file không có ký hiệu đó là SOP chính) và nói rõ bạn phân nhóm theo ký hiệu nào.
+- Danh mục chỉ cho biết file nào TỒN TẠI. Nội dung bên trong file vẫn phải lấy từ TÀI LIỆU THAM KHẢO.
+`;
+}
+
+export function buildSOPSystemPrompt(
+  contextChunks: SearchResult[],
+  useCoT: boolean = false,
+  catalog: CatalogMatch | null = null
+): string {
   const contextBlocks = contextChunks
     .map((c, i) => {
       const sheetInfo = c.sheetName ? ` | Sheet: ${c.sheetName}` : "";
@@ -351,7 +380,7 @@ QUY TẮC NGHIÊM NGẶT:
 7. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.
 8. Khi liệt kê (thiết bị, bước, nhân sự...), trình bày đầy đủ không bỏ sót
 9. Giữ nguyên mã số, tên viết tắt, tên thiết bị như trong tài liệu
-${cotSection}
+${cotSection}${buildCatalogSection(catalog)}
 TÀI LIỆU THAM KHẢO:
 ═══════════════════════════════
 
@@ -362,7 +391,10 @@ ${contextBlocks}
 Dựa HOÀN TOÀN vào tài liệu trên để trả lời. Luôn trích nguồn file khi đưa ra thông tin.`;
 }
 
-export function buildFollowUpSystemPrompt(contextChunks: SearchResult[]): string {
+export function buildFollowUpSystemPrompt(
+  contextChunks: SearchResult[],
+  catalog: CatalogMatch | null = null
+): string {
   const hasContext = contextChunks.length > 0;
 
   const contextSection = hasContext
@@ -393,7 +425,8 @@ QUY TẮC:
 3. KHÔNG trả lời "không tìm thấy" nếu chủ đề đã có trong câu trước
 4. Trích nguồn file, không bịa, không mix data giữa file
 5. Trả lời bằng tiếng Việt
-6. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.${contextSection}`;
+6. KHÔNG dùng emoji, KHÔNG kết câu bằng "Hy vọng giúp được bạn", v.v.
+${buildCatalogSection(catalog)}${contextSection}`;
 }
 
 export function buildChitChatSystemPrompt(): string {
