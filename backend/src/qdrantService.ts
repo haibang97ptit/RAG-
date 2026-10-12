@@ -135,6 +135,7 @@ async function scrollPayloadField(field: string, onValue: (value: any) => void):
 
 export interface IndexedFile {
   fileName: string;
+  filePath: string;
   category: string;
 }
 
@@ -142,10 +143,13 @@ export interface IndexedFile {
 export async function listIndexedFileEntries(): Promise<IndexedFile[]> {
   const byPath = new Map<string, IndexedFile>();
   await scrollPayload(["filePath", "fileName", "category"], (payload) => {
-    if (!payload.fileName) return;
-    const key = payload.filePath || payload.fileName;
-    if (!byPath.has(key)) {
-      byPath.set(key, { fileName: payload.fileName, category: payload.category || "Chung" });
+    if (!payload.fileName || !payload.filePath) return;
+    if (!byPath.has(payload.filePath)) {
+      byPath.set(payload.filePath, {
+        fileName: payload.fileName,
+        filePath: payload.filePath,
+        category: payload.category || "Chung",
+      });
     }
   });
   return Array.from(byPath.values());
@@ -184,15 +188,20 @@ export interface SearchResult {
   sheetName?: string;
 }
 
+// onlyFilePaths: chỉ tìm trong các file này (dùng khi câu hỏi nhắc đích danh mã tài liệu)
 export async function searchSimilar(
   queryVector: number[],
-  topK: number
+  topK: number,
+  onlyFilePaths?: string[]
 ): Promise<SearchResult[]> {
   const c = getQdrantClient();
   const response = await c.query(config.collectionName, {
     query: queryVector,
     limit: topK,
     with_payload: true,
+    ...(onlyFilePaths && onlyFilePaths.length > 0
+      ? { filter: { must: [{ key: "filePath", match: { any: onlyFilePaths } }] } }
+      : {}),
   });
 
   return response.points.map((r) => {

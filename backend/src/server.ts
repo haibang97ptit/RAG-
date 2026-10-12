@@ -25,7 +25,7 @@ import {
   type ChatMessage,
   type Intent,
 } from "./llmService.js";
-import { findCatalogForQuery } from "./fileCatalog.js";
+import { findCatalogForQuery, type CatalogMatch } from "./fileCatalog.js";
 
 const fastify = Fastify({
   logger: {
@@ -106,6 +106,13 @@ function validateQuery(query: unknown): string | null {
   return null;
 }
 
+// Danh mục bị cắt bớt (quá nhiều file khớp) thì con số trong câu hỏi nhiều khả năng
+// không phải mã tài liệu → không thu hẹp phạm vi tìm kiếm.
+function focusPathsOf(catalog: CatalogMatch | null): string[] {
+  if (!catalog || catalog.total > catalog.files.length) return [];
+  return catalog.files.map((f) => f.filePath);
+}
+
 /**
  * Pipeline retrieval nâng cao:
  * - Query expansion → multiple variants
@@ -116,17 +123,47 @@ function validateQuery(query: unknown): string | null {
  */
 async function enhancedRetrieve(
   query: string,
-  complexity: "simple" | "complex"
+  complexity: "simple" | "complex",
+  focusFilePaths: string[] = []
 ): Promise<{ reranked: SearchResult[]; stats: any }> {
   const stats: any = {};
+
+  const allResults: SearchResult[] = [];
+  const seen = new Set<string>();
+  const addResult = (r: SearchResult) => {
+    const key = `${r.filePath}::${r.text.slice(0, 60)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allResults.push(r);
+    }
+  };
+
+  /**
+   * Câu hỏi nhắc đích danh mã tài liệu ("SOP 0005 quy định gì về...") → tìm riêng trong các file
+   * của tài liệu đó và xếp lên đầu. Nội dung chunk không chứa mã nên vector search thuần
+   * không biết chunk nào thuộc SOP nào. Vẫn tìm thêm trên toàn bộ (ít hơn) để không bỏ sót
+   * khi con số trong câu hỏi không phải mã tài liệu.
+   */
+  const searchWithFocus = async (vec: number[]) => {
+    if (focusFilePaths.length === 0) {
+      for (const r of await searchSimilar(vec, config.topK)) addResult(r);
+      return;
+    }
+    const [focused, general] = await Promise.all([
+      searchSimilar(vec, config.topK, focusFilePaths),
+      searchSimilar(vec, Math.ceil(config.topK / 2)),
+    ]);
+    stats.focused_candidates = focused.length;
+    for (const r of focused) addResult(r);
+    for (const r of general) addResult(r);
+  };
 
   // ============== SIMPLE PIPELINE (khi flag off) ==============
   if (!config.enhancedRetrieval) {
     stats.mode = "simple";
-    const vec = await embedQuery(query);
-    const results = await searchSimilar(vec, config.topK);
-    const reranked = await rerankChunks(query, results, config.rerankTopK);
-    stats.unique_candidates = results.length;
+    await searchWithFocus(await embedQuery(query));
+    const reranked = await rerankChunks(query, allResults, config.rerankTopK);
+    stats.unique_candidates = allResults.length;
     stats.reranked_count = reranked.length;
     return { reranked, stats };
   }
@@ -142,20 +179,7 @@ async function enhancedRetrieve(
   stats.hyde_length = hypothetical.length;
 
   const primaryText = hypothetical ? `${query}\n\n${hypothetical}` : query;
-  const primaryVec = await embedQuery(primaryText);
-  const primaryResults = await searchSimilar(primaryVec, config.topK);
-
-  const allResults: SearchResult[] = [];
-  const seen = new Set<string>();
-  const addResult = (r: SearchResult) => {
-    const key = `${r.fileName}::${r.text.slice(0, 60)}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      allResults.push(r);
-    }
-  };
-
-  for (const r of primaryResults) addResult(r);
+  await searchWithFocus(await embedQuery(primaryText));
 
   const secondaryK = Math.max(5, Math.floor(config.topK / 2));
   await Promise.all(
@@ -227,10 +251,8 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     const complexity = classifyComplexity(query);
     const searchQuery =
       intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
-    const [{ reranked }, catalog] = await Promise.all([
-      enhancedRetrieve(searchQuery, complexity),
-      findCatalogForQuery(`${query} ${searchQuery}`),
-    ]);
+    const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
+    const { reranked } = await enhancedRetrieve(searchQuery, complexity, focusPathsOf(catalog));
 
     sources = reranked.map((r) => ({
       fileName: r.fileName,
@@ -303,11 +325,14 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
         intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
 
       // 3. Enhanced retrieve (HyDE + Query Expansion + Rerank)
-      // Song song: tra danh mục file theo mã tài liệu trong câu hỏi (cho câu hỏi đếm/liệt kê)
-      const [{ reranked, stats }, catalog] = await Promise.all([
-        enhancedRetrieve(searchQuery, complexity),
-        findCatalogForQuery(`${query} ${searchQuery}`),
-      ]);
+      // Tra danh mục file theo mã tài liệu trong câu hỏi: dùng cho câu hỏi đếm/liệt kê,
+      // và để ưu tiên tìm trong đúng các file của tài liệu được nhắc tới
+      const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
+      const { reranked, stats } = await enhancedRetrieve(
+        searchQuery,
+        complexity,
+        focusPathsOf(catalog)
+      );
       fastify.log.info(
         { query, searchQuery, intent, complexity, catalog_files: catalog?.total ?? 0, ...stats },
         "retrieval_stats"

@@ -43,6 +43,8 @@ services:
       TOP_K: "20"
       RERANK_TOP_K: "10"
       ENHANCED_RETRIEVAL: ${ENHANCED_RETRIEVAL:-false}
+      # "SOP 0005" mà nhiều phòng ban trùng số → hiểu là của phòng ban này
+      DEFAULT_CATEGORY: ${DEFAULT_CATEGORY:-QA}
       # Để trống = chưa bật auth cho /query* (giai đoạn app cũ chưa gửi token)
       API_TOKEN: ${API_TOKEN:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN}

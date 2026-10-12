@@ -54,4 +54,7 @@ export const config = {
   dataDir,
   manifestPath: path.join(manifestDir, `.ingest-manifest.${collectionName}.json`),
   enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
+  // Khi user gọi tắt mã tài liệu ("SOP 0005") mà nhiều phòng ban có mã trùng số,
+  // ưu tiên phòng ban này (= tên thư mục cấp 1 trong DATA_DIR). Trống = giữ tất cả.
+  defaultCategory: process.env.DEFAULT_CATEGORY || "",
 };

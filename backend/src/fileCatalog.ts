@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import { listIndexedFileEntries, type IndexedFile } from "./qdrantService.js";
 
 /**
@@ -33,36 +34,53 @@ function tokenize(text: string): string[] {
 
 // Số tài liệu: cụm >= 3 chữ số ("0005", "1017"). Số ngắn hơn (phiên bản, số thứ tự) không đủ để định danh.
 const isDocNumber = (t: string) => /^\d{3,}$/.test(t);
-// Token có thể là một phần của mã tài liệu: chữ ASCII ngắn (sop, gen, qa, frm) hoặc số
-const isCodeToken = (t: string) => /^[a-z]{2,6}$/.test(t) || /^\d+$/.test(t);
+// Token có thể là một phần của mã tài liệu: chữ ASCII ngắn (sop, gen, qa, frm) hoặc số tài liệu.
+// Số ngắn bị loại để "SOP 0005 có 17 biểu mẫu?" không bị thu hẹp nhầm về file F17.
+const isCodeToken = (t: string) => /^[a-z]{2,6}$/.test(t) || isDocNumber(t);
+
+// Phần mã của tên file = cụm (không chứa khoảng trắng) có số tài liệu:
+// "FRM-QA-SOP-GEN-0005-F17-02 SELF INSPECTION CHECKLIST – IT" → "FRM-QA-SOP-GEN-0005-F17-02".
+// Chỉ chấm điểm trên phần này, để chữ trong tiêu đề ("IT") không bị coi là mã phòng ban.
+function codePartTokens(fileName: string, docNumber: string): Set<string> {
+  const segments = fileName.replace(/\.[^.]+$/, "").split(/\s+/);
+  const codeSegment = segments.find((s) => tokenize(s).includes(docNumber));
+  return new Set(tokenize(codeSegment || ""));
+}
 
 /**
  * Với mỗi số tài liệu trong câu hỏi: lấy các file có số đó trong tên, rồi chỉ giữ nhóm khớp
  * nhiều phần mã nhất (để "SOP-GEN 0005 QA" không lẫn với "SOP-PRD 0005").
  */
-export function matchFilesByCode(query: string, files: IndexedFile[]): IndexedFile[] {
+export function matchFilesByCode(
+  query: string,
+  files: IndexedFile[],
+  preferredCategory: string = ""
+): IndexedFile[] {
   const queryTokens = Array.from(new Set(tokenize(query)));
   const docNumbers = queryTokens.filter(isDocNumber);
   if (docNumbers.length === 0) return [];
 
   const codeTokens = queryTokens.filter(isCodeToken);
-  const tokenized = files.map((file) => ({
-    file,
-    tokens: new Set(tokenize(file.fileName.replace(/\.[^.]+$/, ""))),
-  }));
-
   const matched = new Set<IndexedFile>();
   for (const docNumber of docNumbers) {
-    const candidates = tokenized
+    const candidates = files
+      .map((file) => ({ file, tokens: codePartTokens(file.fileName, docNumber) }))
       .filter(({ tokens }) => tokens.has(docNumber))
       .map(({ file, tokens }) => ({
         file,
         score: codeTokens.filter((t) => tokens.has(t)).length,
       }));
     const best = Math.max(0, ...candidates.map((c) => c.score));
-    for (const c of candidates) {
-      if (c.score === best) matched.add(c.file);
-    }
+    let group = candidates.filter((c) => c.score === best).map((c) => c.file);
+
+    // Gọi tắt ("SOP 0005") mà nhiều phòng ban cùng có số này → lấy phòng ban mặc định.
+    // Nếu user ghi rõ phòng ban ("SOP IT 0005") thì bước chấm điểm ở trên đã chọn đúng rồi.
+    const preferred = group.filter(
+      (f) => f.category.toLowerCase() === preferredCategory.toLowerCase()
+    );
+    if (preferred.length > 0 && preferred.length < group.length) group = preferred;
+
+    for (const file of group) matched.add(file);
   }
 
   return Array.from(matched).sort((a, b) => a.fileName.localeCompare(b.fileName));
@@ -71,7 +89,7 @@ export function matchFilesByCode(query: string, files: IndexedFile[]): IndexedFi
 /** Lỗi khi tra danh mục không được làm hỏng câu trả lời → trả về null. */
 export async function findCatalogForQuery(query: string): Promise<CatalogMatch | null> {
   try {
-    const matched = matchFilesByCode(query, await getIndexedFiles());
+    const matched = matchFilesByCode(query, await getIndexedFiles(), config.defaultCategory);
     if (matched.length === 0) return null;
     return { files: matched.slice(0, MAX_CATALOG_FILES), total: matched.length };
   } catch (err) {

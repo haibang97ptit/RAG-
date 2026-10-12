@@ -3,7 +3,9 @@
 
 set -euo pipefail
 
-SOURCE="${SOP_SMB_MOUNT:-/mnt/sop-shared}"
+# Chỉ sync thư mục con AI của SMB share (mount tại /mnt/sop-shared).
+# Đổi qua biến môi trường SOP_SMB_MOUNT nếu cần sync thư mục khác.
+SOURCE="${SOP_SMB_MOUNT:-/mnt/sop-shared/AI}"
 TARGET="${SOP_LOCAL_DATA:-/opt/sop-local-data}"
 LOG_PREFIX="[sync-sop]"
 
@@ -12,8 +14,11 @@ if [[ ! -d "$SOURCE" ]]; then
     exit 1
 fi
 
-if ! mountpoint -q "$SOURCE"; then
-    echo "$LOG_PREFIX ⚠️  $SOURCE không phải mount point. Thử: sudo mount -a"
+# SOURCE có thể là mount point hoặc thư mục con của nó. Nếu filesystem chứa SOURCE
+# là "/" thì share chưa được mount → dừng, không để rsync --delete xóa sạch TARGET.
+MOUNT_OF_SOURCE="$(findmnt -n -o TARGET -T "$SOURCE" 2>/dev/null || true)"
+if [[ -z "$MOUNT_OF_SOURCE" || "$MOUNT_OF_SOURCE" == "/" ]]; then
+    echo "$LOG_PREFIX ⚠️  $SOURCE không nằm trên SMB mount. Thử: sudo mount -a"
     exit 1
 fi
 

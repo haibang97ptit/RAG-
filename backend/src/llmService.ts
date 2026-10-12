@@ -271,6 +271,7 @@ QUY TẮC:
 - Đánh giá dựa trên NỘI DUNG, không chỉ keyword
 - Ưu tiên chunks có thông tin TRỰC TIẾP trả lời
 - Đa dạng file nếu nhiều file có thông tin bổ sung
+- Nếu câu hỏi nhắc mã tài liệu (kể cả gọi tắt như "SOP 0005", "SOP QA 0005"), ưu tiên đoạn thuộc file có mã đó trong tên
 - Trả về CHÍNH XÁC JSON array các chỉ số [0-${chunks.length - 1}], KHÔNG kèm text khác
 
 Ví dụ output: [3, 7, 1, 12, 5]`;
@@ -338,6 +339,8 @@ DANH MỤC FILE có mã khớp với câu hỏi - ${catalog.total} file, lấy t
 ${lines}${truncated}
 
 CÁCH DÙNG DANH MỤC FILE:
+- User thường GỌI TẮT mã tài liệu: "SOP 0005", "SOP QA 0005", "SOP-GEN 0005 QA" đều chỉ cùng một SOP. Các file trong danh mục chính là tài liệu user đang nhắc tới - hãy hiểu câu hỏi là về (các) tài liệu này và gọi đúng mã đầy đủ khi trả lời. KHÔNG trả lời "không tìm thấy SOP 0005" khi danh mục có file khớp.
+- Nếu danh mục chứa nhiều SOP KHÁC NHAU trùng số (khác phòng ban hoặc khác nhóm mã), nói rõ có những SOP nào và trả lời riêng cho từng SOP.
 - Khi user hỏi CÓ BAO NHIÊU / LIỆT KÊ tài liệu, biểu mẫu, phụ lục của một SOP: đếm và liệt kê theo DANH MỤC FILE này. KHÔNG đếm theo số đoạn trích bên dưới - đoạn trích chỉ là một phần nhỏ.
 - Phân nhóm theo ký hiệu trong tên file: -Fxx (F01, F02...) = biểu mẫu (Format), -Axx (A01, A02...) = phụ lục (Appendix), file không có ký hiệu F/A là SOP chính. Khi đếm biểu mẫu chỉ đếm file -Fxx, khi đếm phụ lục chỉ đếm file -Axx.
 - Danh mục chỉ cho biết file nào TỒN TẠI. Nội dung bên trong file vẫn phải lấy từ TÀI LIỆU THAM KHẢO.
