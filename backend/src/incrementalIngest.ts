@@ -124,12 +124,16 @@ async function indexFile(filePath: string): Promise<number> {
 
 async function incrementalIngest() {
   const force = process.argv.includes("--force");
+  // Index lại MỌI file dù không đổi (dùng sau khi sửa cách cắt đoạn / cách đọc file).
+  // Từng file được thay tại chỗ nên bot vẫn trả lời được trong lúc chạy.
+  const reindex = process.argv.includes("--reindex");
 
   console.log("🔄 INCREMENTAL INGEST\n");
   console.log(`   Data dir:    ${config.dataDir}`);
   console.log(`   Collection:  ${config.collectionName}`);
   console.log(`   Chunk size:  ${config.chunkSize}`);
-  console.log(`   Manifest:    ${MANIFEST_PATH}\n`);
+  console.log(`   Manifest:    ${MANIFEST_PATH}`);
+  console.log(`   Reindex:     ${reindex ? "YES (index lại mọi file)" : "NO (chỉ file mới / thay đổi)"}\n`);
 
   console.log("1️⃣  Load embedding model...");
   await initEmbedder();
@@ -174,7 +178,7 @@ async function incrementalIngest() {
 
     if (!prev) {
       toIndex.push({ filePath, isNew: true });
-    } else if (prev.hash !== hash || Math.abs(prev.mtime - mtime) > 1 || prev.size !== size) {
+    } else if (reindex || prev.hash !== hash || Math.abs(prev.mtime - mtime) > 1 || prev.size !== size) {
       toIndex.push({ filePath, isNew: false });
     } else {
       unchanged.push(filePath);

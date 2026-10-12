@@ -116,11 +116,17 @@ export function chunkText(text: string, options: ChunkOptions): string[] {
 
   for (const block of blocks) {
     if (block.type === "table") {
+      // Tiêu đề đứng ngay trước bảng là tiêu đề của bảng đó → gắn vào chunk đầu của bảng
+      const { rest, headings } = splitTrailingHeadings(textBuffer);
+      textBuffer = rest;
       flushTextBuffer();
       const tableChunks = splitLargeTable(
         block.content,
         Math.floor(options.chunkSize * TABLE_CHUNK_RATIO)
       );
+      if (headings.length > 0 && tableChunks.length > 0) {
+        tableChunks[0] = headings.join("\n\n") + "\n\n" + tableChunks[0];
+      }
       chunks.push(...tableChunks);
     } else {
       textBuffer += block.content.join("\n") + "\n";
@@ -131,6 +137,27 @@ export function chunkText(text: string, options: ChunkOptions): string[] {
   return chunks.filter((c) => c.trim().length > 0);
 }
 
+/**
+ * Dòng tiêu đề mục: "## 5.3 Quản lý mật khẩu" (Word dùng style Heading), "6.2.1 Kiểm soát truy cập",
+ * "4.5 User credentials" (đánh số, không kết thúc bằng dấu câu).
+ */
+export function isHeadingLine(paragraph: string): boolean {
+  const text = paragraph.trim();
+  if (text.includes("\n") || text.length > 110) return false;
+  if (/^#{1,6}\s+\S/.test(text)) return true;
+  return /^\d+(\.\d+)*[.)]?\s+\S/.test(text) && !/[.;:,]$/.test(text);
+}
+
+/** Tách các tiêu đề nằm ở CUỐI đoạn text (chúng thuộc về nội dung đứng sau). */
+function splitTrailingHeadings(text: string): { rest: string; headings: string[] } {
+  const paragraphs = text.split(/\n\n+/).map((p) => p.trim()).filter((p) => p.length > 0);
+  const headings: string[] = [];
+  while (paragraphs.length > 0 && isHeadingLine(paragraphs[paragraphs.length - 1])) {
+    headings.unshift(paragraphs.pop()!);
+  }
+  return { rest: paragraphs.join("\n\n"), headings };
+}
+
 function chunkTextContent(text: string, options: ChunkOptions): string[] {
   const paragraphs = text
     .split(/\n\n+/)
@@ -138,26 +165,35 @@ function chunkTextContent(text: string, options: ChunkOptions): string[] {
     .filter((p) => p.length > 0);
 
   const chunks: string[] = [];
-  let buffer = "";
+  let buffer: string[] = [];
+  const sizeWith = (para: string) => [...buffer, para].join("\n\n").length;
+
+  // Đóng chunk hiện tại. Tiêu đề nằm cuối chunk thuộc về nội dung phía sau, nên không để nó
+  // kết thúc chunk này mà trả về để mở đầu chunk kế tiếp - tiêu đề luôn đi cùng nội dung của nó.
+  const flush = (): string[] => {
+    const carried: string[] = [];
+    while (buffer.length > 0 && isHeadingLine(buffer[buffer.length - 1])) {
+      carried.unshift(buffer.pop()!);
+    }
+    if (buffer.length > 0) chunks.push(buffer.join("\n\n"));
+    buffer = [];
+    return carried;
+  };
 
   for (const para of paragraphs) {
     if (para.length > options.chunkSize) {
-      if (buffer) {
-        chunks.push(buffer.trim());
-        buffer = "";
-      }
+      const carried = flush();
       const subChunks = chunkParagraph(para, options);
+      if (carried.length > 0) subChunks[0] = carried.join("\n\n") + "\n\n" + subChunks[0];
       chunks.push(...subChunks);
+    } else if (sizeWith(para) <= options.chunkSize) {
+      buffer.push(para);
     } else {
-      if ((buffer + "\n\n" + para).length <= options.chunkSize) {
-        buffer = buffer ? buffer + "\n\n" + para : para;
-      } else {
-        if (buffer) chunks.push(buffer.trim());
-        buffer = para;
-      }
+      buffer = [...flush(), para];
     }
   }
 
-  if (buffer.trim()) chunks.push(buffer.trim());
+  // Hết nội dung: không còn gì phía sau để mang tiêu đề sang
+  if (buffer.length > 0) chunks.push(buffer.join("\n\n"));
   return chunks;
 }

@@ -1,3 +1,4 @@
+import { isHeadingLine } from "./chunker.js";
 import { embed, embedQuery } from "./embedding.js";
 import { getIndexedFiles, isMainDocument, type CatalogMatch } from "./fileCatalog.js";
 import {
@@ -105,14 +106,6 @@ interface Unit extends OverlapChunk {
 
 // ============== Tách tài liệu thành các mục ==============
 
-// Dòng tiêu đề: "## 5.3 Quản lý mật khẩu", "6.2.1 Kiểm soát truy cập", "4.5 User credentials"
-function isHeading(paragraph: string): boolean {
-  const text = paragraph.trim();
-  if (text.includes("\n") || text.length > 110) return false;
-  if (/^#{1,6}\s+\S/.test(text)) return true;
-  return /^\d+(\.\d+)*[.)]?\s+\S/.test(text) && !/[.;:,]$/.test(text);
-}
-
 const cleanHeading = (heading: string) => heading.replace(/^#{1,6}\s+/, "").trim();
 
 /**
@@ -155,7 +148,7 @@ export function splitIntoSections(chunks: ChunkWithVector[]): OverlapChunk[] {
   };
 
   for (const paragraph of paragraphs) {
-    if (isHeading(paragraph)) {
+    if (isHeadingLine(paragraph)) {
       flush();
       heading = cleanHeading(paragraph);
       seenHeading = true;
