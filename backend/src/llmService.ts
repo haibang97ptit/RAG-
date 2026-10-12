@@ -475,6 +475,54 @@ ${FORMAT_RULES}
 ${buildCatalogSection(catalog)}${contextSection}`;
 }
 
+/** Gọi model router cho các tác vụ phân tích ngắn (trả JSON). Lỗi → chuỗi rỗng. */
+export async function callRouter(
+  systemPrompt: string,
+  userContent: string,
+  maxTokens: number = 600
+): Promise<string> {
+  try {
+    const response = await getGroq().chat.completions.create({
+      model: config.routerModel,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0,
+      max_tokens: maxTokens,
+    });
+    return response.choices[0]?.message?.content?.trim() || "";
+  } catch (err) {
+    console.warn("Router call failed:", (err as Error).message);
+    return "";
+  }
+}
+
+/** Prompt trả lời từ dữ liệu QualZen (kết quả truy vấn SQL, không phải đoạn trích tài liệu). */
+export function buildQualzenSystemPrompt(dataJson: string, queriedAt: string): string {
+  return `Bạn là trợ lý AI nội bộ của công ty dược phẩm. Người dùng đang hỏi về hồ sơ trong hệ thống QualZen (QMS): Action Item, CCN (Change Control), CAPA.
+
+DỮ LIỆU QUALZEN (truy vấn trực tiếp từ hệ thống lúc ${queriedAt}, giờ Việt Nam):
+${dataJson}
+
+QUY TẮC:
+1. CHỈ trả lời dựa trên DỮ LIỆU QUALZEN ở trên. KHÔNG bịa mã phiếu, tên người, ngày tháng, trạng thái.
+2. Nếu "tongSo" là 0: nói bạn không tìm thấy phiếu nào khớp, nhắc lại điều kiện đã tìm (trong "dieuKienLoc") và gợi ý người dùng kiểm tra lại mã hoặc điều kiện.
+3. Nếu "tongSo" lớn hơn "soDongHienThi": nói rõ tổng số, cho biết bạn chỉ liệt kê được số phiếu trong "soDongHienThi" và gợi ý thu hẹp điều kiện (phòng ban, trạng thái, thời gian).
+4. Câu hỏi đếm / thống kê: trả lời bằng con số trong "tongSo" và "thongKe", không tự đếm lại từ danh sách.
+5. Câu hỏi "đang ở bước nào / chờ ai": dùng "trangThai", "buocHienTai" và "dangChoAi". Nếu "dangChoAi" trống thì nói theo "buocHienTai", không đoán tên người.
+6. Giữ nguyên mã phiếu và nội dung gốc (phần lớn bằng tiếng Anh); có thể diễn giải ngắn bằng tiếng Việt nhưng không dịch sai nghĩa.
+7. Ngày giờ ghi đúng như trong dữ liệu (dd/mm/yyyy). Phiếu có "quaHan": true thì nêu rõ là đã quá hạn.
+8. Nếu dữ liệu có trường "loi": cho người dùng biết hiện không truy vấn được QualZen và đề nghị thử lại sau.
+9. Trả lời bằng tiếng Việt.
+
+${VOICE_RULES}
+
+${FORMAT_RULES}
+- Một phiếu: trình bày các thông tin chính bằng gạch đầu dòng (mã, nội dung, phòng ban, trạng thái, hạn, người phụ trách...), lịch sử xử lý theo thứ tự thời gian
+- Nhiều phiếu: mỗi phiếu một gạch đầu dòng, bắt đầu bằng mã phiếu in đậm, kèm nội dung tóm tắt, trạng thái và hạn`;
+}
+
 export function buildChitChatSystemPrompt(): string {
   return `Bạn là trợ lý AI nội bộ của công ty, giúp nhân viên tra cứu tài liệu SOP.
 

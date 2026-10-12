@@ -23,11 +23,13 @@ import {
   buildSOPSystemPrompt,
   buildFollowUpSystemPrompt,
   buildChitChatSystemPrompt,
+  buildQualzenSystemPrompt,
   streamChatCompletion,
   type ChatMessage,
   type Intent,
 } from "./llmService.js";
 import { selectDisplayedSources, type UiSource } from "./citedSources.js";
+import { answerDataForQualzen, looksLikeQualzenQuestion } from "./qualzenAssistant.js";
 import {
   findCatalogForQuery,
   isMainDocument,
@@ -272,6 +274,28 @@ fastify.get("/stats", async () => {
   };
 });
 
+/**
+ * Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) → system prompt chứa dữ liệu truy vấn được.
+ * Trả về null nếu tính năng tắt hoặc câu hỏi là về tài liệu SOP (đi tiếp luồng RAG bình thường).
+ */
+async function qualzenPromptFor(
+  query: string,
+  history: ChatMessage[]
+): Promise<string | null> {
+  if (!config.qualzenEnabled) return null;
+
+  // Câu hỏi tiếp nối ("còn cái nào quá hạn?") không tự chứa từ khóa → xét cả lượt hỏi-đáp gần nhất.
+  // Không dựa vào intent vì bộ phân loại có thể coi câu đó là câu hỏi mới.
+  const recentContext = history.slice(-2).map((m) => m.content.slice(0, 500)).join("\n");
+  if (!looksLikeQualzenQuestion(`${query}\n${recentContext}`)) return null;
+
+  const data = await answerDataForQualzen(query, history);
+  if (!data) return null;
+
+  fastify.log.info({ query, plan: data.plan }, "qualzen_query");
+  return buildQualzenSystemPrompt(data.dataJson, data.queriedAt);
+}
+
 // JSON endpoint (debug)
 fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
   const { query, history } = request.body ?? ({} as QueryBody);
@@ -293,29 +317,33 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
       answer += delta;
     }
   } else {
-    const complexity = classifyComplexity(query);
-    const searchQuery =
-      intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
-    const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
-    const { reranked } = await enhancedRetrieve(
-      searchQuery,
-      complexity,
-      focusPathsOf(catalog),
-      overviewPathsOf(searchQuery, catalog)
-    );
+    let sysPrompt = await qualzenPromptFor(query, limitedHistory);
 
-    sources = reranked.map((r) => ({
-      fileName: r.fileName,
-      category: r.category,
-      sheetName: r.sheetName,
-      score: r.score,
-    }));
+    if (!sysPrompt) {
+      const complexity = classifyComplexity(query);
+      const searchQuery =
+        intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
+      const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
+      const { reranked } = await enhancedRetrieve(
+        searchQuery,
+        complexity,
+        focusPathsOf(catalog),
+        overviewPathsOf(searchQuery, catalog)
+      );
 
-    const useCoT = complexity === "complex";
-    const sysPrompt =
-      intent === "FOLLOW_UP"
-        ? buildFollowUpSystemPrompt(reranked, catalog)
-        : buildSOPSystemPrompt(reranked, useCoT, catalog);
+      sources = reranked.map((r) => ({
+        fileName: r.fileName,
+        category: r.category,
+        sheetName: r.sheetName,
+        score: r.score,
+      }));
+
+      const useCoT = complexity === "complex";
+      sysPrompt =
+        intent === "FOLLOW_UP"
+          ? buildFollowUpSystemPrompt(reranked, catalog)
+          : buildSOPSystemPrompt(reranked, useCoT, catalog);
+    }
 
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     for await (const delta of streamChatCompletion(sysPrompt, messages)) {
@@ -363,8 +391,15 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     // Mọi file có đoạn trích đưa vào prompt (không trùng), theo thứ tự ưu tiên
     const retrievedSources: UiSource[] = [];
 
+    // Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) trả lời từ database, không qua tài liệu SOP
+    const qualzenPrompt =
+      intent === "CHITCHAT" ? null : await qualzenPromptFor(query, limitedHistory);
+
     if (intent === "CHITCHAT") {
       sysPrompt = buildChitChatSystemPrompt();
+      send("sources", { sources: [] });
+    } else if (qualzenPrompt) {
+      sysPrompt = qualzenPrompt;
       send("sources", { sources: [] });
     } else {
       // 1. Classify complexity
@@ -462,6 +497,7 @@ async function start() {
     console.log(`   Pipeline:    ${config.enhancedRetrieval ? "ENHANCED (HyDE + Expansion + Adaptive)" : "SIMPLE (basic retrieval)"}`);
     console.log(`   Top-K:       ${config.topK} → rerank top ${config.rerankTopK}`);
     console.log(`   UI sources:  Max ${MAX_UI_SOURCES} unique files`);
+    console.log(`   QualZen:     ${config.qualzenEnabled ? "BẬT (Action Item, CCN, CAPA)" : "tắt (chưa có QUALZEN_DB_*)"}`);
     console.log(`   Auth:        /query* ${config.apiToken ? "cần API_TOKEN" : "KHÔNG auth (API_TOKEN trống)"} | /stats ${config.adminToken || config.apiToken ? "cần token" : "KHÔNG auth"}`);
     if (!config.apiToken) {
       fastify.log.warn("API_TOKEN chưa đặt: ai truy cập được port này cũng gọi được /query");

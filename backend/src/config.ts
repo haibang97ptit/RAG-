@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import { qualzenSettingsFromEnv } from "./qualzenDb.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +55,8 @@ export const config = {
   dataDir,
   manifestPath: path.join(manifestDir, `.ingest-manifest.${collectionName}.json`),
   enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
+  // Tra cứu hồ sơ QualZen (Action Item, CCN, CAPA) - bật khi có đủ QUALZEN_DB_*
+  qualzenEnabled: qualzenSettingsFromEnv() !== null,
   // Khi user gọi tắt mã tài liệu ("SOP 0005") mà nhiều phòng ban có mã trùng số,
   // ưu tiên phòng ban này (= tên thư mục cấp 1 trong DATA_DIR). Trống = giữ tất cả.
   defaultCategory: process.env.DEFAULT_CATEGORY || "",
