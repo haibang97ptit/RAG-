@@ -261,9 +261,20 @@ async function planQuery(query: string, history: ChatMessage[]): Promise<Qualzen
   const plan = parsePlan(raw);
   if (plan === "sop" || plan === null) return null;
   // LLM chọn QualZen và câu hỏi có nhắc mã tài liệu (không phải mã của chính phiếu) → lọc theo tài liệu đó
-  if (!plan.number && docRefs.length > 0) {
-    plan.relatedDocuments = docRefs.map((r) => r.label);
-    plan.relatedDocPatterns = docRefs.flatMap((r) => r.patterns);
+  if (docRefs.length > 0) {
+    // LLM hay chép mã tài liệu vào number / keyword; để nguyên thì thành tìm lỏng theo "0039"
+    // và ra cả phiếu của SOP phòng khác có cùng số
+    const docCodes = docRefs.map((r) => squashCode(r.label));
+    const isDocCode = (value: string | null) => {
+      const squashed = value ? squashCode(value) : "";
+      return squashed.length >= 3 && docCodes.some((code) => code.includes(squashed) || squashed.includes(code));
+    };
+    if (isDocCode(plan.number)) plan.number = null;
+    if (isDocCode(plan.keyword)) plan.keyword = null;
+    if (!plan.number) {
+      plan.relatedDocuments = docRefs.map((r) => r.label);
+      plan.relatedDocPatterns = docRefs.flatMap((r) => r.patterns);
+    }
   }
   return plan;
 }
