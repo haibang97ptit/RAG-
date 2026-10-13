@@ -71,6 +71,13 @@ function stripDiacritics(text: string): string {
 // FullName trong DB có dạng "NV00250 - CAM  BUI" (thừa khoảng trắng)
 const personName = (value: unknown): string | null => clip(value, 200);
 
+/**
+ * Biểu thức SQL bỏ hết dấu phân cách và đổi thành chữ hoa, để mã tài liệu khớp bất kể cách viết:
+ * "FRM/IT/SOP-GEN/0016", "FRM.IT.SOP-GEN.0016", "FRM-IT-SOP-GEN 0016" đều thành "FRMITSOPGEN0016".
+ */
+const sqlSquash = (column: string) =>
+  `UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(${column}, ''), '/', ''), '.', ''), '-', ''), '_', ''), ' ', ''), CHAR(160), ''))`;
+
 const likePattern = (text: string) => `%${text.replace(/[%_[]/g, (ch) => `[${ch}]`)}%`;
 
 // ============== Khớp mã phiếu ==============
@@ -149,6 +156,20 @@ class Where {
     if (filter) this.conditions.push(...codeConditions(this.params, column, filter));
   }
 
+  /**
+   * Nội dung (một trong các cột) có nhắc tới tài liệu. `patterns` là các mẫu LIKE trên chuỗi đã bỏ dấu
+   * phân cách (vd "%FRMITSOPGEN0016%"); khớp một mẫu bất kỳ ở một cột bất kỳ là đủ.
+   */
+  mentionsDocument(columns: string[], patterns?: string[] | null) {
+    if (!patterns || patterns.length === 0) return;
+    const alternatives: string[] = [];
+    for (const pattern of patterns.slice(0, 12)) {
+      const param = this.param(sql.NVarChar, pattern);
+      for (const column of columns) alternatives.push(`${sqlSquash(column)} LIKE ${param}`);
+    }
+    this.add(`(${alternatives.join(" OR ")})`);
+  }
+
   /** Khoảng ngày theo lịch Việt Nam ("YYYY-MM-DD") trên cột lưu UTC. */
   dateRange(column: string, from?: string | null, to?: string | null) {
     const isDate = (s?: string | null): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -199,6 +220,7 @@ export interface ActionItemFilters {
   status?: ActionItemStatus | null;
   person?: string | null; // tên người phụ trách
   keyword?: string | null; // từ khóa trong nội dung
+  relatedDocPatterns?: string[] | null; // nội dung có nhắc tới các mã tài liệu này
   createdFrom?: string | null; // YYYY-MM-DD
   createdTo?: string | null;
   // Khoảng ngày ở trên áp vào: ngày tạo (mặc định), hạn hoàn thành, hoặc ngày đóng
@@ -283,6 +305,7 @@ function actionItemWhere(request: sql.Request, f: ActionItemFilters): Where {
   if (f.keyword?.trim()) {
     where.add(`a.ActionPlanDescription LIKE ${where.param(sql.NVarChar, likePattern(f.keyword.trim()))}`);
   }
+  where.mentionsDocument(["a.ActionPlanDescription"], f.relatedDocPatterns);
   where.dateRange(ACTION_ITEM_DATE_COLUMNS[f.dateField ?? "created"], f.createdFrom, f.createdTo);
   return where;
 }
@@ -411,6 +434,7 @@ export async function getActionItemDetail(pool: sql.ConnectionPool, row: any) {
 
 export interface CcnFilters {
   number?: string | null;
+  relatedDocPatterns?: string[] | null; // đề xuất thay đổi có nhắc tới các mã tài liệu này
   department?: string | null;
   person?: string | null; // người khởi tạo
   keyword?: string | null;
@@ -427,6 +451,15 @@ LEFT JOIN LIMS.vw_UserDetails hod ON hod.EmpID = c.HOD_EmpID
 LEFT JOIN LIMS.vw_UserDetails qa ON qa.EmpID = c.QA_EmpID
 LEFT JOIN LIMS.vw_UserDetails hqa ON hqa.EmpID = c.HeadQA_EmpID`;
 
+// Các ô nội dung của CCN nơi người soạn ghi tài liệu bị thay đổi
+const CCN_TEXT_COLUMNS = [
+  "c.ProposedChanges",
+  "c.ExistingProcedure",
+  "c.DocumentProposedChange",
+  "c.ShortChangeDescription",
+  "c.ReasonforproposedChange",
+];
+
 function ccnWhere(request: sql.Request, f: CcnFilters): Where {
   const where = new Where(request);
   where.code("c.CCN_No", parseCodeFragment(f.number));
@@ -442,6 +475,7 @@ function ccnWhere(request: sql.Request, f: CcnFilters): Where {
     const p = where.param(sql.NVarChar, likePattern(f.keyword.trim()));
     where.add(`(c.ProposedChanges LIKE ${p} OR c.ShortChangeDescription LIKE ${p} OR c.ExistingProcedure LIKE ${p})`);
   }
+  where.mentionsDocument(CCN_TEXT_COLUMNS, f.relatedDocPatterns);
   where.dateRange("c.CCN_Date", f.createdFrom, f.createdTo);
   return where;
 }
@@ -456,6 +490,8 @@ function mapCcn(row: any, textChars: number) {
     thayDoiDeXuat: clip(row.ProposedChanges, textChars),
     lyDo: clip(row.ReasonforproposedChange, textChars),
     hienTrang: clip(row.ShortChangeDescription, textChars),
+    quyTrinhHienTai: clip(row.ExistingProcedure, textChars),
+    taiLieuThayDoi: clip(row.DocumentProposedChange, textChars),
     nguoiKhoiTao: personName(row.InitiatorName),
     truongBoPhan: personName(row.HODName),
     qa: personName(row.QAName),
@@ -481,7 +517,7 @@ export async function searchCcns(
   const rows = (
     await listRequest.query(`
       SELECT TOP (@limit) c.CCN_ID, c.CCN_No, c.CCN_Date, c.TargetDate, c.CurrentStatus, s.StatusName,
-        c.ProposedChanges, c.ReasonforproposedChange, c.ShortChangeDescription,
+        c.ProposedChanges, c.ReasonforproposedChange, c.ShortChangeDescription, c.ExistingProcedure, c.DocumentProposedChange,
         d.DepartmentName, d.DeptCode,
         ini.FullName AS InitiatorName, hod.FullName AS HODName, qa.FullName AS QAName, hqa.FullName AS HeadQAName,
         (SELECT COUNT(*) FROM QualZen_ActionPlan.ActionPlanMaster a
@@ -533,6 +569,7 @@ export async function getCcnDetail(pool: sql.ConnectionPool, row: any) {
 
 export interface CapaFilters {
   number?: string | null;
+  relatedDocPatterns?: string[] | null;
   sourceEventNumber?: string | null; // mã sự kiện gốc: DR/..., LIR/..., OOS/...
   keyword?: string | null;
   createdFrom?: string | null;
@@ -558,6 +595,7 @@ function capaWhere(request: sql.Request, f: CapaFilters): Where {
     const p = where.param(sql.NVarChar, likePattern(f.keyword.trim()));
     where.add(`(ap.RootCause_Details LIKE ${p} OR ap.Capa_ActionDesc LIKE ${p} OR ap.QEorNCorOthers LIKE ${p})`);
   }
+  where.mentionsDocument(["ap.RootCause_Details", "ap.Capa_ActionDesc", "ap.QEorNCorOthers"], f.relatedDocPatterns);
   where.dateRange("p.CAPA_Date", f.createdFrom, f.createdTo);
   return where;
 }

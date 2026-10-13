@@ -662,8 +662,9 @@ QUY TẮC:
 5. Câu hỏi "đang ở bước nào / chờ ai": dùng "trangThai", "buocHienTai" và "dangChoAi". Nếu "dangChoAi" trống thì nói theo "buocHienTai", không đoán tên người.
 6. Giữ nguyên mã phiếu và nội dung gốc (phần lớn bằng tiếng Anh); có thể diễn giải ngắn bằng tiếng Việt nhưng không dịch sai nghĩa.
 7. Ngày giờ ghi đúng như trong dữ liệu (dd/mm/yyyy). Phiếu có "quaHan": true thì nêu rõ là đã quá hạn.
-8. Nếu dữ liệu có trường "loi": cho người dùng biết hiện không truy vấn được QualZen và đề nghị thử lại sau.
-9. Trả lời bằng tiếng Việt.
+8. Nếu "dieuKienLoc" có "noiDungCoNhacToiTaiLieu": các phiếu trong danh sách là những phiếu có NỘI DUNG nhắc tới tài liệu đó. Với mỗi phiếu, nêu ngắn gọn phiếu đề xuất thay đổi gì đối với tài liệu ấy (dựa vào "thayDoiDeXuat", "quyTrinhHienTai", "taiLieuThayDoi", "noiDung"). Nếu không có phiếu nào, nói rõ không tìm thấy phiếu nào nhắc tới mã tài liệu đó và đề nghị người dùng kiểm tra lại mã.
+9. Nếu dữ liệu có trường "loi": cho người dùng biết hiện không truy vấn được QualZen và đề nghị thử lại sau.
+10. Trả lời bằng tiếng Việt.
 
 ${VOICE_RULES}
 

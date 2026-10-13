@@ -81,6 +81,21 @@ async function smoke() {
   }
   await step("ccn / phòng IT", () => searchCcns(pool, { department: "IT" }, 5), listSummary);
 
+  // ---- Tìm theo mã tài liệu được nhắc trong nội dung ----
+  // Mẫu rộng (mọi SOP loại GEN) chỉ để xác nhận câu lệnh chạy được trên cấu trúc bảng thật
+  const anySopGen = ["%SOPGEN[0-9][0-9][0-9][0-9]%"];
+  await step("ccn / nội dung có nhắc một SOP-GEN", () => searchCcns(pool, { relatedDocPatterns: anySopGen }, 5), listSummary);
+  await step(
+    "action_item / nội dung có nhắc một SOP-GEN",
+    () => searchActionItems(pool, { relatedDocPatterns: anySopGen }, 5),
+    listSummary
+  );
+  await step(
+    "ccn / nhắc SOP IT 0001 (FRM/IT/SOP-GEN/0001)",
+    () => searchCcns(pool, { relatedDocPatterns: ["%FRMITSOPGEN0001%", "%ITSOP[A-Z][A-Z][A-Z]0001%"] }, 5),
+    (r) => `${listSummary(r)} | ${r.danhSach.map((c: any) => c.maCCN).join(", ")}`
+  );
+
   // ---- CAPA ----
   const capas = await step("capa / mới nhất", () => searchCapas(pool, {}, 5), listSummary);
   const firstCapa = capas?._rows?.[0];

@@ -1,3 +1,5 @@
+import { config } from "./config.js";
+import { getIndexedFiles, isMainDocument, matchFileGroupsByCode } from "./fileCatalog.js";
 import { callRouter, type ChatMessage } from "./llmService.js";
 import { getQualzenPool } from "./qualzenDb.js";
 import {
@@ -37,6 +39,9 @@ export interface QualzenPlan {
   toDate: string | null;
   dateField: DateField | null;
   listAll: boolean;
+  // Phiếu có nội dung nhắc tới các tài liệu này (vd CCN đề xuất sửa SOP nào)
+  relatedDocuments: string[];
+  relatedDocPatterns: string[];
 }
 
 // Mã phiếu đầy đủ: AI/FRM/QC/2026/1139, PCC/FRM/IT/2026/009, CAPA/FRM/QC/2026/136
@@ -54,6 +59,85 @@ const QUALZEN_HINT =
 export function looksLikeQualzenQuestion(text: string): boolean {
   const normalized = text.normalize("NFC");
   return FULL_CODE.some(([, re]) => re.test(normalized)) || QUALZEN_HINT.test(normalized);
+}
+
+// ============== Mã tài liệu (SOP) được nhắc trong câu hỏi ==============
+
+// Mã viết liền bằng dấu phân cách, cho phép 1 khoảng trắng trước số: "FRM/IT/SOP-GEN 0016", "P.IT.1016"
+const TIGHT_DOC_CODE =
+  /(?<![\p{L}\p{N}])[A-Za-z]{1,6}(?:[\/.\-_][A-Za-z0-9]{1,8}){1,7}(?:[ \/.\-_]+\d{3,6})?(?![\p{L}\p{N}])/gu;
+// Gọi tắt: "SOP IT 0006", "SOP 0006"
+const LOOSE_SOP_CODE = /(?<![\p{L}\p{N}])sop\s+(?:([A-Za-z]{2,3})\s+)?(\d{3,6})(?![\p{L}\p{N}])/giu;
+// Mã của chính phiếu QualZen, không phải mã tài liệu
+const RECORD_CODE_PREFIX = /^(AI|PCC|DFT|CAPA|DR|LIR|OOS)(?![A-Za-z])/i;
+
+const squashCode = (text: string) => (text.match(/[A-Za-z0-9]+/g) || []).join("").toUpperCase();
+
+export interface DocumentRef {
+  label: string; // như người dùng viết
+  patterns: string[]; // mẫu LIKE trên chuỗi đã bỏ dấu phân cách
+}
+
+/** Tìm các mã tài liệu trong câu hỏi và đổi thành mẫu tìm kiếm không phụ thuộc cách viết mã. */
+export async function extractDocumentRefs(query: string): Promise<DocumentRef[]> {
+  const text = query.normalize("NFC");
+  const refs: DocumentRef[] = [];
+  const covered: [number, number][] = [];
+
+  for (const match of text.matchAll(TIGHT_DOC_CODE)) {
+    const code = match[0];
+    if (RECORD_CODE_PREFIX.test(code) || !/\d{3,}/.test(code)) continue;
+    covered.push([match.index!, match.index! + code.length]);
+    refs.push({ label: code.trim(), patterns: [`%${squashCode(code)}%`] });
+  }
+
+  for (const match of text.matchAll(LOOSE_SOP_CODE)) {
+    const start = match.index!;
+    if (covered.some(([a, b]) => start < b && start + match[0].length > a)) continue;
+    const dept = match[1]?.toUpperCase();
+    const number = match[2];
+    const patterns: string[] = [];
+
+    // Nếu SOP này có trong kho tài liệu thì lấy mã đầy đủ từ tên file
+    try {
+      const groups = matchFileGroupsByCode(`sop ${dept ?? ""} ${number}`, await getIndexedFiles(), config.defaultCategory);
+      for (const file of (groups[0] ?? []).filter((f) => isMainDocument(f.fileName)).slice(0, 3)) {
+        const segment = file.fileName.replace(/\.[^.]+$/, "").split(/\s+/).find((s) => s.includes(number));
+        if (segment) patterns.push(`%${squashCode(segment.slice(0, segment.indexOf(number) + number.length))}%`);
+      }
+    } catch {
+      // không tra được danh mục thì dùng mẫu dự phòng bên dưới
+    }
+    // Dự phòng theo cách đặt mã của công ty: FRM/<phòng>/SOP-<loại 3 chữ>/<số> và P.<phòng>.<số>
+    if (dept) {
+      patterns.push(`%${dept}SOP[A-Z][A-Z][A-Z]${number}%`, `%P${dept}${number}%`);
+      // Mã kiểu cũ đánh số từ 1000: trong dữ liệu, "P.IT.1001" và "FRM/IT/SOP-GEN/0001" là cùng một SOP
+      if (/^0\d{3}$/.test(number)) patterns.push(`%P${dept}1${number.slice(1)}%`);
+    } else {
+      patterns.push(`%SOP[A-Z][A-Z][A-Z]${number}%`);
+    }
+
+    refs.push({ label: match[0].trim(), patterns: Array.from(new Set(patterns)) });
+  }
+  return refs;
+}
+
+// "tìm các CCN liên quan đến sửa SOP X": loại phiếu + ý "liên quan / sửa / thay đổi" + mã tài liệu
+const RELATED_WORDS =
+  /(?<![\p{L}\p{N}])(liên quan|sửa|sửa đổi|chỉnh sửa|thay đổi|cập nhật|đề xuất|đề cập|nhắc tới|nhắc đến|ảnh hưởng|revise|revised|revision|update|updated|related)(?![\p{L}\p{N}])/iu;
+// Dấu hiệu đang hỏi CÁCH LÀM / nội dung quy trình ("quy trình change control theo SOP X gồm mấy bước"):
+// khi đó không tự định tuyến, để bước lập kế hoạch bằng LLM phân biệt.
+const PROCEDURE_QUESTION_WORDS =
+  /(?<![\p{L}\p{N}])(quy trình|quy định|hướng dẫn|các bước|mấy bước|bước nào|thế nào|như thế nào|là gì|cách|how|procedure|steps?)(?![\p{L}\p{N}])/iu;
+const ACTION_ITEM_WORDS = /(?<![\p{L}\p{N}])action\s*(items?|plans?)(?![\p{L}\p{N}])/iu;
+const CAPA_WORDS = /(?<![\p{L}\p{N}])capa(?![\p{L}\p{N}])/iu;
+const CCN_WORDS = /(?<![\p{L}\p{N}])(ccn|pcc|change\s*controls?|change)(?![\p{L}\p{N}])/iu;
+
+function moduleMentioned(text: string): Module | null {
+  if (ACTION_ITEM_WORDS.test(text)) return "action_item";
+  if (CCN_WORDS.test(text)) return "ccn";
+  if (CAPA_WORDS.test(text)) return "capa";
+  return null;
 }
 
 const STATUSES: ActionItemStatus[] = [
@@ -79,11 +163,13 @@ const emptyPlan = (module: Module): QualzenPlan => ({
   toDate: null,
   dateField: null,
   listAll: false,
+  relatedDocuments: [],
+  relatedDocPatterns: [],
 });
 
 const PLANNER_PROMPT = `Bạn phân tích câu hỏi cho trợ lý nội bộ của công ty dược. Có 2 nguồn trả lời:
 - "sop": TÀI LIỆU quy trình (SOP, biểu mẫu, hướng dẫn). Dùng khi hỏi CÁCH LÀM, quy định, định nghĩa, nội dung tài liệu. Ví dụ: "quy trình change control gồm mấy bước", "khi nào phải mở CAPA", "biểu mẫu CAPA là gì".
-- "qualzen": HỒ SƠ thực tế trong hệ thống QualZen. Dùng khi hỏi về phiếu cụ thể hoặc danh sách / số lượng / trạng thái / ai đang giữ / ngày tạo / hạn của Action Item, CCN (Change Control, mã PCC/...), CAPA. Ví dụ: "IT còn bao nhiêu action item quá hạn", "AI 1139 đang chờ ai duyệt", "PCC IT 009 có những action item nào".
+- "qualzen": HỒ SƠ thực tế trong hệ thống QualZen (kể cả câu hỏi "CCN / action item nào liên quan tới, đề xuất sửa SOP X" - đó là tìm phiếu, không phải hỏi nội dung SOP). Dùng khi hỏi về phiếu cụ thể hoặc danh sách / số lượng / trạng thái / ai đang giữ / ngày tạo / hạn của Action Item, CCN (Change Control, mã PCC/...), CAPA. Ví dụ: "IT còn bao nhiêu action item quá hạn", "AI 1139 đang chờ ai duyệt", "PCC IT 009 có những action item nào".
 Nếu không chắc → "sop".
 
 Trả về DUY NHẤT một JSON, không giải thích:
@@ -132,6 +218,8 @@ function parsePlan(raw: string): QualzenPlan | "sop" | null {
     toDate: date(json.to_date),
     dateField,
     listAll: json.list_all === true,
+    relatedDocuments: [],
+    relatedDocPatterns: [],
   };
 }
 
@@ -141,6 +229,23 @@ async function planQuery(query: string, history: ChatMessage[]): Promise<Qualzen
   const codes = FULL_CODE.map(([module, re]) => ({ module, match: normalized.match(re) })).filter((c) => c.match);
   if (codes.length === 1) {
     return { ...emptyPlan(codes[0].module), number: codes[0].match![0] };
+  }
+
+  // "CCN / action item nào liên quan tới SOP X": đủ rõ để tra thẳng, không phụ thuộc LLM
+  const docRefs = await extractDocumentRefs(normalized);
+  const mentioned = moduleMentioned(normalized);
+  if (
+    codes.length === 0 &&
+    mentioned &&
+    docRefs.length > 0 &&
+    RELATED_WORDS.test(normalized) &&
+    !PROCEDURE_QUESTION_WORDS.test(normalized)
+  ) {
+    return {
+      ...emptyPlan(mentioned),
+      relatedDocuments: docRefs.map((r) => r.label),
+      relatedDocPatterns: docRefs.flatMap((r) => r.patterns),
+    };
   }
 
   const historyText = history
@@ -154,7 +259,13 @@ async function planQuery(query: string, history: ChatMessage[]): Promise<Qualzen
     `Hôm nay: ${today}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`
   );
   const plan = parsePlan(raw);
-  return plan === "sop" ? null : plan;
+  if (plan === "sop" || plan === null) return null;
+  // LLM chọn QualZen và câu hỏi có nhắc mã tài liệu (không phải mã của chính phiếu) → lọc theo tài liệu đó
+  if (!plan.number && docRefs.length > 0) {
+    plan.relatedDocuments = docRefs.map((r) => r.label);
+    plan.relatedDocPatterns = docRefs.flatMap((r) => r.patterns);
+  }
+  return plan;
 }
 
 // Bộ lọc đã áp dụng, để LLM nhắc lại khi không tìm thấy gì
@@ -167,6 +278,9 @@ function describeFilters(plan: QualzenPlan): Record<string, string> {
   if (plan.status) filters.trangThai = plan.status;
   if (plan.person) filters.nguoi = plan.person;
   if (plan.keyword) filters.tuKhoa = plan.keyword;
+  if (plan.relatedDocuments.length > 0) {
+    filters.noiDungCoNhacToiTaiLieu = plan.relatedDocuments.join(" hoặc ");
+  }
   const dateLabel = { created: "ngày tạo", target: "hạn hoàn thành", closed: "ngày đóng" }[plan.dateField ?? "created"];
   if (plan.fromDate || plan.toDate) {
     filters.khoangNgay = `${dateLabel} từ ${plan.fromDate ?? "…"} đến ${plan.toDate ?? "…"}`;
@@ -191,6 +305,7 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
       status: plan.status,
       person: plan.person,
       keyword: plan.keyword,
+      relatedDocPatterns: plan.relatedDocPatterns,
       ...dates,
       dateField: plan.dateField,
     }, limit, textChars);
@@ -207,6 +322,7 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
       department: plan.department,
       person: plan.person,
       keyword: plan.keyword,
+      relatedDocPatterns: plan.relatedDocPatterns,
       ...dates,
     }, limit, textChars);
     const { _rows, ...listing } = result;
@@ -216,7 +332,12 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
     return { loaiPhieu: "CCN (Change Control)", ...listing };
   }
 
-  const result = await searchCapas(pool, { number: plan.number, keyword: plan.keyword, ...dates }, limit, textChars);
+  const result = await searchCapas(
+    pool,
+    { number: plan.number, keyword: plan.keyword, relatedDocPatterns: plan.relatedDocPatterns, ...dates },
+    limit,
+    textChars
+  );
   const { _rows, ...listing } = result;
   if (_rows.length === 1) {
     return { loaiPhieu: "CAPA", tongSo: 1, chiTiet: await getCapaDetail(pool, _rows[0]) };
