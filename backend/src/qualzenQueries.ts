@@ -75,8 +75,10 @@ const personName = (value: unknown): string | null => clip(value, 200);
  * Biểu thức SQL bỏ hết dấu phân cách và đổi thành chữ hoa, để mã tài liệu khớp bất kể cách viết:
  * "FRM/IT/SOP-GEN/0016", "FRM.IT.SOP-GEN.0016", "FRM-IT-SOP-GEN 0016" đều thành "FRMITSOPGEN0016".
  */
+// Gồm cả các ký tự "trông giống" mà Word hay tự chèn: gạch nối U+2010/2011, gạch dài U+2013/2014
+const SQUASHED_CHARS = ["'/'", "'.'", "'-'", "'_'", "' '", "CHAR(160)", "NCHAR(8208)", "NCHAR(8209)", "NCHAR(8211)", "NCHAR(8212)"];
 const sqlSquash = (column: string) =>
-  `UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(${column}, ''), '/', ''), '.', ''), '-', ''), '_', ''), ' ', ''), CHAR(160), ''))`;
+  `UPPER(${SQUASHED_CHARS.reduce((expr, ch) => `REPLACE(${expr}, ${ch}, '')`, `ISNULL(${column}, '')`)})`;
 
 const likePattern = (text: string) => `%${text.replace(/[%_[]/g, (ch) => `[${ch}]`)}%`;
 

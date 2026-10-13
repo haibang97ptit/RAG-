@@ -71,6 +71,16 @@ const LOOSE_SOP_CODE = /(?<![\p{L}\p{N}])sop\s+(?:([A-Za-z]{2,3})\s+)?(\d{3,6})(
 // Mã của chính phiếu QualZen, không phải mã tài liệu
 const RECORD_CODE_PREFIX = /^(AI|PCC|DFT|CAPA|DR|LIR|OOS)(?![A-Za-z])/i;
 
+// Mã chép từ Word / QualZen hay mang ký tự "trông giống": gạch nối không ngắt (U+2011), gạch dài,
+// khoảng trắng không ngắt, ký tự vô hình. Đưa hết về dạng ASCII trước khi nhận diện mã.
+const cleanCodeText = (text: string) =>
+  text
+    .normalize("NFC")
+    .replace(/[\u00AD\u200B-\u200D\u2060\uFEFF]/g, "")
+    .replace(/[\p{Pd}\u2212]/gu, "-")
+    .replace(/[\u2044\u2215\uFF0F]/g, "/")
+    .replace(/\p{Zs}/gu, " ");
+
 const squashCode = (text: string) => (text.match(/[A-Za-z0-9]+/g) || []).join("").toUpperCase();
 
 export interface DocumentRef {
@@ -80,7 +90,7 @@ export interface DocumentRef {
 
 /** Tìm các mã tài liệu trong câu hỏi và đổi thành mẫu tìm kiếm không phụ thuộc cách viết mã. */
 export async function extractDocumentRefs(query: string): Promise<DocumentRef[]> {
-  const text = query.normalize("NFC");
+  const text = cleanCodeText(query);
   const refs: DocumentRef[] = [];
   const covered: [number, number][] = [];
 
@@ -225,7 +235,7 @@ function parsePlan(raw: string): QualzenPlan | "sop" | null {
 
 async function planQuery(query: string, history: ChatMessage[]): Promise<QualzenPlan | null> {
   // Có mã đầy đủ thì không cần LLM: tra thẳng phiếu đó
-  const normalized = query.normalize("NFC");
+  const normalized = cleanCodeText(query);
   const codes = FULL_CODE.map(([module, re]) => ({ module, match: normalized.match(re) })).filter((c) => c.match);
   if (codes.length === 1) {
     return { ...emptyPlan(codes[0].module), number: codes[0].match![0] };
