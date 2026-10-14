@@ -1,3 +1,5 @@
+import { stripExtension } from "./fileCatalog.js";
+
 /**
  * Chọn "nguồn tham khảo" hiển thị cho user SAU KHI đã có câu trả lời.
  *
@@ -36,7 +38,7 @@ function squash(text: string): string {
 
 // Các cách LLM có thể nhắc tới 1 file: tên đầy đủ, chỉ phần mã, hoặc mã bỏ số phiên bản ở cuối
 function citationKeys(fileName: string): string[] {
-  const baseName = fileName.replace(/\.[^.]+$/, "");
+  const baseName = stripExtension(fileName);
   const keys = [squash(baseName)];
 
   const codePart = baseName.split(/\s+/).find((segment) => /\d{3,}/.test(segment));

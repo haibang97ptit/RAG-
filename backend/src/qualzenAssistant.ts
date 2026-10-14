@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { getIndexedFiles, isMainDocument, matchFileGroupsByCode } from "./fileCatalog.js";
+import { getIndexedFiles, isMainDocument, matchFileGroupsByCode, stripExtension } from "./fileCatalog.js";
 import { callRouter, type ChatMessage } from "./llmService.js";
 import { getQualzenPool } from "./qualzenDb.js";
 import {
@@ -116,7 +116,7 @@ export async function extractDocumentRefs(query: string): Promise<DocumentRef[]>
     try {
       const groups = matchFileGroupsByCode(`sop ${dept ?? ""} ${number}`, await getIndexedFiles(), config.defaultCategory);
       for (const file of (groups[0] ?? []).filter((f) => isMainDocument(f.fileName)).slice(0, 3)) {
-        const segment = file.fileName.replace(/\.[^.]+$/, "").split(/\s+/).find((s) => s.includes(number));
+        const segment = stripExtension(file.fileName).split(/\s+/).find((s) => s.includes(number));
         if (segment) patterns.push(`%${squashCode(segment.slice(0, segment.indexOf(number) + number.length))}%`);
       }
     } catch {

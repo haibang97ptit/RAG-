@@ -44,7 +44,7 @@ const isCodeToken = (t: string) => /^[a-z]{2,6}$/.test(t) || isDocNumber(t);
 // "FRM-QA-SOP-GEN-0005-F17-02 SELF INSPECTION CHECKLIST – IT" → "FRM-QA-SOP-GEN-0005-F17-02".
 // Chỉ chấm điểm trên phần này, để chữ trong tiêu đề ("IT") không bị coi là mã phòng ban.
 function codePartTokens(fileName: string, docNumber: string): Set<string> {
-  const segments = fileName.replace(/\.[^.]+$/, "").split(/\s+/);
+  const segments = stripExtension(fileName).split(/\s+/);
   const codeSegment = segments.find((s) => tokenize(s).includes(docNumber));
   return new Set(tokenize(codeSegment || ""));
 }
@@ -101,9 +101,13 @@ export function matchFileGroupsByCode(
 // Ký hiệu biểu mẫu / phụ lục trong mã: -F01, -A03 (F = Format, A = Appendix)
 const FORM_OR_APPENDIX = /(?<![\p{L}\p{N}])[fa]\d{1,3}(?![\p{L}\p{N}])/iu;
 
+// Chỉ bỏ đuôi file thật: tên kiểu "FRM.QA.SOP-GEN.0005-F11-03 ..." có dấu chấm trong mã,
+// bỏ "phần sau dấu chấm cuối" với tên đã mất đuôi sẽ cắt mất cả mã
+export const stripExtension = (fileName: string) => fileName.replace(/\.(docx?|pdf|xlsx?|txt|md)$/i, "");
+
 /** File không có ký hiệu F/A trong tên là SOP chính. */
 export function isMainDocument(fileName: string): boolean {
-  return !FORM_OR_APPENDIX.test(fileName.replace(/\.[^.]+$/, ""));
+  return !FORM_OR_APPENDIX.test(stripExtension(fileName));
 }
 
 /** Câu hỏi có nhắc đích danh một biểu mẫu / phụ lục ("F07 của SOP 0005") không. */

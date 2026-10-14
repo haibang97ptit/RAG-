@@ -1,4 +1,4 @@
-import { getIndexedFiles, isMainDocument } from "./fileCatalog.js";
+import { getIndexedFiles, isMainDocument, stripExtension } from "./fileCatalog.js";
 import type { IndexedFile } from "./qdrantService.js";
 
 /**
@@ -63,7 +63,7 @@ export interface InventoryReply {
 const tokenize = (text: string) => text.normalize("NFC").toLowerCase().match(/\p{L}+|\p{N}+/gu) || [];
 
 function docTypeOf(fileName: string): DocType {
-  const name = fileName.replace(/\.[^.]+$/, "");
+  const name = stripExtension(fileName);
   if (isMainDocument(name)) return "sop";
   return /(?<![\p{L}\p{N}])a\d{1,3}(?![\p{L}\p{N}])/iu.test(name) ? "appendix" : "form";
 }
@@ -74,7 +74,7 @@ function docTypeOf(fileName: string): DocType {
  * "FRM-QA-SOP-GEN-0005-03 SELF INSPECTION.docx" → "frm qa sop gen 0005".
  */
 function documentKey(fileName: string): string {
-  const name = fileName.replace(/\.[^.]+$/, "");
+  const name = stripExtension(fileName);
   const segment = name.split(/\s+/).find((s) => /\d{3,}/.test(s));
   if (!segment) return name.toLowerCase();
   const tokens = tokenize(segment);
@@ -164,7 +164,7 @@ function renderList(entries: DocumentEntry[], types: DocType[], groupByCategory:
     lines.push(
       "",
       ...groupEntries.map((e) => {
-        const name = e.fileName.replace(/\.[^.]+$/, "");
+        const name = stripExtension(e.fileName);
         const short = name.length > LIST_LINE_CHARS ? `${name.slice(0, LIST_LINE_CHARS)}…` : name;
         return `- ${short}${e.fileCount > 1 ? ` _(${e.fileCount} file)_` : ""}`;
       })
