@@ -674,6 +674,26 @@ ${FORMAT_RULES}
 - Hơn 8 phiếu: mỗi phiếu ĐÚNG MỘT dòng ngắn, không có gạch đầu dòng con: **mã phiếu** - nội dung rút gọn - hạn - người phụ trách (thêm "QUÁ HẠN" nếu quá hạn). Liệt kê ĐỦ mọi phiếu có trong dữ liệu, không bỏ bớt, không viết "..."`;
 }
 
+/**
+ * Danh sách quá dài để đưa qua LLM: server tự in danh sách phiếu ngay sau câu trả lời,
+ * LLM chỉ nhận số liệu tổng hợp và viết phần mở đầu.
+ */
+export function buildQualzenListIntroPrompt(summaryJson: string, queriedAt: string): string {
+  return `Bạn là trợ lý AI nội bộ của công ty dược phẩm. Người dùng hỏi một danh sách phiếu trong hệ thống QualZen (QMS).
+
+SỐ LIỆU TỔNG HỢP (truy vấn trực tiếp từ hệ thống lúc ${queriedAt}, giờ Việt Nam):
+${summaryJson}
+
+Danh sách từng phiếu sẽ được hệ thống TỰ ĐỘNG hiển thị ngay bên dưới câu trả lời của bạn. Nhiệm vụ của bạn chỉ là viết PHẦN MỞ ĐẦU:
+1. Một câu nêu tổng số phiếu ("tongSo") khớp điều kiện trong "dieuKienLoc", diễn đạt tự nhiên.
+2. Tóm tắt số liệu trong "thongKe": theo phòng ban, theo trạng thái, số đang mở / đã đóng / quá hạn nếu có. Từ 3 nhóm trở lên thì dùng gạch đầu dòng, mỗi nhóm một dòng ngắn. Dùng đúng các con số có trong dữ liệu, không tự tính thêm.
+3. Nếu "tongSo" lớn hơn "soDongHienThi": nói danh sách bên dưới gồm "soDongHienThi" phiếu.
+4. KHÔNG liệt kê từng phiếu, KHÔNG bịa mã phiếu. Không viết câu kiểu "dưới đây là danh sách" ở cuối, hệ thống tự thêm tiêu đề.
+5. Ngắn gọn, tối đa khoảng 12 dòng. Trả lời bằng tiếng Việt.
+
+${VOICE_RULES}`;
+}
+
 export function buildChitChatSystemPrompt(): string {
   return `Bạn là trợ lý AI nội bộ của công ty, giúp nhân viên tra cứu tài liệu SOP.
 

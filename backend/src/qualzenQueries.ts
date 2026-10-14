@@ -27,7 +27,8 @@ const LIST_TEXT_CHARS = 300;
 
 /** Số phiếu tối đa mỗi lần liệt kê, và khi người dùng yêu cầu "liệt kê hết". */
 export const DEFAULT_LIST_LIMIT = 20;
-export const FULL_LIST_LIMIT = 100;
+// Danh sách dài do server tự in (không đưa qua LLM) nên lấy được nhiều phiếu
+export const FULL_LIST_LIMIT = 300;
 /** Liệt kê hết thì mỗi phiếu chỉ giữ nội dung ngắn, để câu trả lời không quá dài. */
 export const COMPACT_TEXT_CHARS = 110;
 
@@ -186,6 +187,15 @@ class Where {
   toString(): string {
     return this.conditions.length > 0 ? `WHERE ${this.conditions.join("\n  AND ")}` : "";
   }
+}
+
+const deptLabel = (row: any) => (row.DeptCode ? `${row.DepartmentName} (${row.DeptCode})` : "Chưa rõ phòng ban");
+
+/** Đếm theo nhóm, nhóm đông nhất đứng đầu: { "Quality Assurance (QA)": 35, ... } */
+function tally(rows: any[], label: (row: any) => string): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(label(row), (counts.get(label(row)) ?? 0) + row.n);
+  return Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
 }
 
 /** "72" / "72,58" (EmpID) → tên. */
@@ -386,9 +396,25 @@ export async function searchActionItems(
         a.CreatedDate DESC`)
   ).recordset;
 
+  // Số phiếu theo phòng ban trên TOÀN BỘ kết quả (không chỉ phần được liệt kê)
+  let byDepartment: Record<string, number> | undefined;
+  if (summary.total > 1) {
+    const deptRequest = pool.request();
+    const deptWhere = actionItemWhere(deptRequest, filters);
+    const deptRows = (
+      await deptRequest.query(`
+        SELECT d.DepartmentName, d.DeptCode, COUNT(*) AS n
+        ${ACTION_ITEM_FROM}
+        ${deptWhere}
+        GROUP BY d.DepartmentName, d.DeptCode`)
+    ).recordset;
+    byDepartment = tally(deptRows, deptLabel);
+  }
+
   return {
     tongSo: summary.total as number,
     thongKe: {
+      theoPhongBan: byDepartment,
       dangMo: summary.openCount ?? 0,
       daDong: summary.closed ?? 0,
       quaHan: summary.overdue ?? 0,
@@ -532,7 +558,31 @@ export async function searchCcns(
       ORDER BY c.CCN_Date DESC`)
   ).recordset;
 
-  return { tongSo: total, soDongHienThi: rows.length, danhSach: rows.map((r: any) => mapCcn(r, textChars)), _rows: rows };
+  // Số phiếu theo phòng ban / trạng thái trên TOÀN BỘ kết quả (không chỉ phần được liệt kê)
+  let thongKe: Record<string, Record<string, number>> | undefined;
+  if (total > 1) {
+    const groupRequest = pool.request();
+    const groupWhere = ccnWhere(groupRequest, filters);
+    const groupRows = (
+      await groupRequest.query(`
+        SELECT d.DepartmentName, d.DeptCode, s.StatusName, c.CurrentStatus, COUNT(*) AS n
+        ${CCN_FROM}
+        ${groupWhere}
+        GROUP BY d.DepartmentName, d.DeptCode, s.StatusName, c.CurrentStatus`)
+    ).recordset;
+    thongKe = {
+      theoPhongBan: tally(groupRows, deptLabel),
+      theoTrangThai: tally(groupRows, (r) => r.StatusName || `Mã trạng thái ${r.CurrentStatus}`),
+    };
+  }
+
+  return {
+    tongSo: total,
+    thongKe,
+    soDongHienThi: rows.length,
+    danhSach: rows.map((r: any) => mapCcn(r, textChars)),
+    _rows: rows,
+  };
 }
 
 export async function getCcnDetail(pool: sql.ConnectionPool, row: any) {

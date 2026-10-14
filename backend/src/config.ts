@@ -57,6 +57,10 @@ export const config = {
   enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
   // Tra cứu hồ sơ QualZen (Action Item, CCN, CAPA) - bật khi có đủ QUALZEN_DB_*
   qualzenEnabled: qualzenSettingsFromEnv() !== null,
+  // Dữ liệu QualZen đưa vào prompt tối đa bao nhiêu ký tự (~3 ký tự / token). Mặc định vừa giới hạn
+  // 8.000 token/phút của Groq gói miễn phí; danh sách dài hơn thì server tự in, LLM chỉ viết phần tóm tắt.
+  // Nâng gói Groq thì có thể tăng (vd 40000) để LLM tự trình bày nhiều phiếu hơn.
+  qualzenPromptBudgetChars: parseInt(process.env.QUALZEN_PROMPT_BUDGET_CHARS || "12000", 10),
   // Khi user gọi tắt mã tài liệu ("SOP 0005") mà nhiều phòng ban có mã trùng số,
   // ưu tiên phòng ban này (= tên thư mục cấp 1 trong DATA_DIR). Trống = giữ tất cả.
   defaultCategory: process.env.DEFAULT_CATEGORY || "",

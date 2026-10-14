@@ -57,6 +57,8 @@ services:
       QUALZEN_DB_USER: ${QUALZEN_DB_USER:-}
       QUALZEN_DB_PASSWORD: ${QUALZEN_DB_PASSWORD:-}
       QUALZEN_DB_ENCRYPT: ${QUALZEN_DB_ENCRYPT:-false}
+      # Dữ liệu QualZen tối đa đưa vào prompt (ký tự). Danh sách dài hơn do server tự in.
+      QUALZEN_PROMPT_BUDGET_CHARS: ${QUALZEN_PROMPT_BUDGET_CHARS:-12000}
       CACHE_DIR: /app/.cache
       DATA_DIR: /app/data
       MANIFEST_DIR: /app/state

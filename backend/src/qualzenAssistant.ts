@@ -370,6 +370,83 @@ export interface QualzenAnswerData {
   dataJson: string;
   queriedAt: string;
   plan: QualzenPlan;
+  // Danh sách quá dài để đưa qua LLM: server tự in phần này ngay sau đoạn tóm tắt của LLM
+  list: { markdown: string; fallbackIntro: string } | null;
+}
+
+// Mở đầu phần danh sách do server in. Server cũng dựa vào dòng này để lược danh sách khỏi lịch sử hội thoại.
+export const QUALZEN_LIST_HEADING = "**Danh sách chi tiết";
+const LIST_LINE_TEXT_CHARS = 140;
+// Khi phải thu gọn: nội dung từng phiếu trong danh sách / các ô nội dung khác
+const COMPACT_OTHER_TEXT_CHARS = 600;
+
+const oneLine = (value: unknown, maxChars: number) => {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+};
+const datePart = (value: unknown) => (typeof value === "string" ? value.split(" ")[0] : null);
+
+/** Thu gọn dữ liệu: bỏ ô trống, cắt ngắn chữ (phiếu trong danh sách cắt ngắn hơn). */
+function compactData(value: unknown, inList = false): unknown {
+  if (Array.isArray(value)) return value.map((v) => compactData(v, true));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value)) {
+      if (v === null || v === undefined || v === "") continue;
+      out[key] = compactData(v, inList);
+    }
+    return out;
+  }
+  if (typeof value === "string") return oneLine(value, inList ? COMPACT_TEXT_CHARS : COMPACT_OTHER_TEXT_CHARS);
+  return value;
+}
+
+/** Một dòng cho mỗi phiếu: mã in đậm, các thông tin chính, rồi nội dung rút gọn. */
+function listLine(module: Module, item: any): string {
+  const parts: string[] = [`**${item.maActionItem ?? item.maCCN ?? item.maCAPA}**`];
+  if (module === "action_item") {
+    if (item.quaHan) parts.push("**QUÁ HẠN**");
+    parts.push(item.trangThai);
+    if (item.hanHoanThanh) parts.push(`hạn ${datePart(item.hanHoanThanh)}`);
+    if (item.nguoiPhuTrach) parts.push(item.nguoiPhuTrach);
+  } else if (module === "ccn") {
+    parts.push(item.trangThai);
+    if (item.ngayTao) parts.push(`tạo ${datePart(item.ngayTao)}`);
+  } else {
+    if (item.suKienGoc) parts.push(`sự kiện ${item.suKienGoc}`);
+    if (item.ngayTao) parts.push(`tạo ${datePart(item.ngayTao)}`);
+    if (item.hanHoanThanh) parts.push(`hạn ${datePart(item.hanHoanThanh)}`);
+  }
+  const text = item.thayDoiDeXuat ?? item.hienTrang ?? item.noiDung ?? item.moTaSuKien;
+  return `- ${parts.filter(Boolean).join(" · ")}${text ? ` — ${oneLine(text, LIST_LINE_TEXT_CHARS)}` : ""}`;
+}
+
+/** In danh sách phiếu bằng markdown; nhóm theo phòng ban khi câu hỏi không lọc theo phòng ban. */
+function renderList(module: Module, data: Record<string, any>, groupByDepartment: boolean): string {
+  const items: any[] = data.danhSach;
+  const lines = [`${QUALZEN_LIST_HEADING} (${items.length}/${data.tongSo} phiếu)**`];
+
+  const groups = new Map<string, any[]>();
+  for (const item of items) {
+    const key = groupByDepartment ? (item.phongBan ?? item.phongBanThucHien ?? "Chưa rõ phòng ban") : "";
+    groups.set(key, [...(groups.get(key) ?? []), item]);
+  }
+  for (const [department, groupItems] of groups) {
+    if (groupByDepartment) {
+      const departmentTotal: number | undefined = data.thongKe?.theoPhongBan?.[department];
+      const count =
+        departmentTotal && departmentTotal > groupItems.length ? `${groupItems.length}/${departmentTotal}` : groupItems.length;
+      lines.push("", `**${department}** (${count})`);
+    }
+    lines.push("", ...groupItems.map((item) => listLine(module, item)));
+  }
+  if (data.tongSo > items.length) {
+    lines.push(
+      "",
+      `_Mới hiển thị ${items.length}/${data.tongSo} phiếu. Thu hẹp theo phòng ban, trạng thái hoặc thời gian để xem phần còn lại._`
+    );
+  }
+  return `\n\n${lines.join("\n")}`;
 }
 
 /**
@@ -384,7 +461,7 @@ export async function answerDataForQualzen(
   if (!plan) return null;
 
   const queriedAt = formatDate(new Date()) ?? "";
-  let data: Record<string, unknown>;
+  let data: Record<string, any>;
   try {
     data = { dieuKienLoc: describeFilters(plan), ...(await runPlan(plan)) };
   } catch (err) {
@@ -392,5 +469,26 @@ export async function answerDataForQualzen(
     data = { loi: "Không truy vấn được hệ thống QualZen lúc này." };
   }
 
-  return { dataJson: JSON.stringify(data, null, 1), queriedAt, plan };
+  // Vừa giới hạn token → giữ nguyên như cũ: LLM đọc toàn bộ dữ liệu và tự trình bày
+  const budget = config.qualzenPromptBudgetChars;
+  const full = JSON.stringify(data, null, 1);
+  if (full.length <= budget) return { dataJson: full, queriedAt, plan, list: null };
+
+  // Quá dài: thử thu gọn (bỏ ô trống, cắt ngắn chữ) trước
+  const compact = JSON.stringify(compactData(data));
+  if (compact.length <= budget || !Array.isArray(data.danhSach)) {
+    return { dataJson: compact, queriedAt, plan, list: null };
+  }
+
+  // Vẫn quá dài: server tự in danh sách, LLM chỉ nhận số liệu tổng hợp để viết phần tóm tắt
+  const { danhSach, ...summary } = data;
+  return {
+    dataJson: JSON.stringify(compactData(summary), null, 1),
+    queriedAt,
+    plan,
+    list: {
+      markdown: renderList(plan.module, data, !plan.department),
+      fallbackIntro: `Tìm thấy **${data.tongSo}** phiếu ${data.loaiPhieu} khớp điều kiện.`,
+    },
+  };
 }

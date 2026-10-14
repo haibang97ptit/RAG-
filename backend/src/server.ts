@@ -24,6 +24,7 @@ import {
   buildFollowUpSystemPrompt,
   buildChitChatSystemPrompt,
   buildQualzenSystemPrompt,
+  buildQualzenListIntroPrompt,
   buildOverlapSystemPrompt,
   isOverlapQuestion,
   isCompareQuestion,
@@ -32,7 +33,7 @@ import {
   type Intent,
 } from "./llmService.js";
 import { selectDisplayedSources, type UiSource } from "./citedSources.js";
-import { answerDataForQualzen, looksLikeQualzenQuestion } from "./qualzenAssistant.js";
+import { answerDataForQualzen, looksLikeQualzenQuestion, QUALZEN_LIST_HEADING } from "./qualzenAssistant.js";
 import { findOverlapContext, type OverlapContext } from "./overlapFinder.js";
 import {
   findCatalogForQuery,
@@ -97,6 +98,8 @@ const MAX_UI_SOURCES = 5;
 const OVERVIEW_OPENING_RATIO = 0.6;
 // Câu trả lời từ QualZen có thể là danh sách dài ("liệt kê hết")
 const QUALZEN_MAX_ANSWER_TOKENS = 6000;
+// Danh sách dài do server tự in: LLM chỉ viết đoạn mở đầu
+const QUALZEN_LIST_INTRO_MAX_TOKENS = 1200;
 // Báo cáo rà trùng lặp giữa các SOP dài hơn câu trả lời tra cứu thông thường
 const OVERLAP_MAX_ANSWER_TOKENS = 4000;
 const MAX_QUERY_CHARS = 4000;
@@ -114,7 +117,11 @@ function sanitizeHistory(history: unknown): ChatMessage[] {
   for (const m of history) {
     if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
     if (typeof m.content !== "string" || !m.content.trim()) continue;
-    clean.push({ role: m.role, content: m.content.slice(0, MAX_HISTORY_CONTENT_CHARS) });
+    let content = m.content;
+    // Danh sách phiếu QualZen do server in có thể rất dài: bỏ khỏi lịch sử để câu hỏi sau không vượt hạn mức token
+    const listStart = m.role === "assistant" ? content.indexOf(QUALZEN_LIST_HEADING) : -1;
+    if (listStart >= 0) content = `${content.slice(0, listStart)}(Kèm danh sách chi tiết các phiếu, đã lược bỏ ở đây.)`;
+    clean.push({ role: m.role, content: content.slice(0, MAX_HISTORY_CONTENT_CHARS) });
   }
   return clean.slice(-MAX_HISTORY_MESSAGES);
 }
@@ -303,10 +310,14 @@ async function overlapContextFor(query: string, catalog: CatalogMatch | null): P
  * Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) → system prompt chứa dữ liệu truy vấn được.
  * Trả về null nếu tính năng tắt hoặc câu hỏi là về tài liệu SOP (đi tiếp luồng RAG bình thường).
  */
-async function qualzenPromptFor(
-  query: string,
-  history: ChatMessage[]
-): Promise<string | null> {
+interface QualzenReply {
+  prompt: string;
+  maxTokens: number;
+  // Danh sách dài: server in thẳng sau phần mở đầu của LLM (không tốn token)
+  list: { markdown: string; fallbackIntro: string } | null;
+}
+
+async function qualzenReplyFor(query: string, history: ChatMessage[]): Promise<QualzenReply | null> {
   if (!config.qualzenEnabled) return null;
 
   // Câu hỏi tiếp nối ("còn cái nào quá hạn?") không tự chứa từ khóa → xét cả lượt hỏi-đáp gần nhất.
@@ -317,8 +328,33 @@ async function qualzenPromptFor(
   const data = await answerDataForQualzen(query, history);
   if (!data) return null;
 
-  fastify.log.info({ query, plan: data.plan }, "qualzen_query");
-  return buildQualzenSystemPrompt(data.dataJson, data.queriedAt);
+  fastify.log.info({ query, plan: data.plan, serverList: !!data.list, promptChars: data.dataJson.length }, "qualzen_query");
+  return data.list
+    ? {
+        prompt: buildQualzenListIntroPrompt(data.dataJson, data.queriedAt),
+        maxTokens: QUALZEN_LIST_INTRO_MAX_TOKENS,
+        list: data.list,
+      }
+    : { prompt: buildQualzenSystemPrompt(data.dataJson, data.queriedAt), maxTokens: QUALZEN_MAX_ANSWER_TOKENS, list: null };
+}
+
+/**
+ * Câu trả lời QualZen kèm danh sách do server in. Nếu LLM lỗi trước khi viết được chữ nào
+ * (vd hết hạn mức Groq) thì vẫn trả danh sách, kèm một câu mở đầu dựng sẵn.
+ */
+async function* streamQualzenAnswer(reply: QualzenReply, messages: ChatMessage[]): AsyncGenerator<string> {
+  let wroteAny = false;
+  try {
+    for await (const delta of streamChatCompletion(reply.prompt, messages, reply.maxTokens)) {
+      wroteAny = true;
+      yield delta;
+    }
+  } catch (err) {
+    if (!reply.list || wroteAny) throw err;
+    fastify.log.warn({ err: (err as Error).message }, "qualzen_list_intro_failed");
+    yield reply.list.fallbackIntro;
+  }
+  if (reply.list) yield reply.list.markdown;
 }
 
 // JSON endpoint (debug)
@@ -342,10 +378,11 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
       answer += delta;
     }
   } else {
-    let sysPrompt = await qualzenPromptFor(query, limitedHistory);
-    let maxTokens = sysPrompt ? QUALZEN_MAX_ANSWER_TOKENS : undefined;
+    const qualzen = await qualzenReplyFor(query, limitedHistory);
+    let sysPrompt = "";
+    let maxTokens: number | undefined;
 
-    if (!sysPrompt) {
+    if (!qualzen) {
       const complexity = classifyComplexity(query);
       const searchQuery =
         intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
@@ -382,7 +419,10 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     }
 
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
-    for await (const delta of streamChatCompletion(sysPrompt, messages, maxTokens)) {
+    const stream = qualzen
+      ? streamQualzenAnswer(qualzen, messages)
+      : streamChatCompletion(sysPrompt, messages, maxTokens);
+    for await (const delta of stream) {
       answer += delta;
     }
   }
@@ -429,15 +469,13 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     const retrievedSources: UiSource[] = [];
 
     // Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) trả lời từ database, không qua tài liệu SOP
-    const qualzenPrompt =
-      intent === "CHITCHAT" ? null : await qualzenPromptFor(query, limitedHistory);
+    const qualzen = intent === "CHITCHAT" ? null : await qualzenReplyFor(query, limitedHistory);
 
     if (intent === "CHITCHAT") {
       sysPrompt = buildChitChatSystemPrompt();
       send("sources", { sources: [] });
-    } else if (qualzenPrompt) {
-      sysPrompt = qualzenPrompt;
-      maxTokens = QUALZEN_MAX_ANSWER_TOKENS;
+    } else if (qualzen) {
+      sysPrompt = qualzen.prompt;
       send("sources", { sources: [] });
     } else {
       // 1. Classify complexity
@@ -502,7 +540,10 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     // 6. Stream LLM response
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
     let answer = "";
-    for await (const delta of streamChatCompletion(sysPrompt, messages, maxTokens)) {
+    const stream = qualzen
+      ? streamQualzenAnswer(qualzen, messages)
+      : streamChatCompletion(sysPrompt, messages, maxTokens);
+    for await (const delta of stream) {
       answer += delta;
       send("chunk", { delta });
     }
