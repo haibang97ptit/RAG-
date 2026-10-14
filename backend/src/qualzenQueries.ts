@@ -468,6 +468,17 @@ export interface CcnFilters {
   keyword?: string | null;
   createdFrom?: string | null;
   createdTo?: string | null;
+  // Tên trạng thái đúng như trong Qzen_AAPL.CCN_ObjectStatus: chỉ lấy / bỏ các trạng thái này
+  statusIn?: string[] | null;
+  statusNotIn?: string[] | null;
+}
+
+/** Tên các trạng thái CCN có trong hệ thống (để bước lập kế hoạch chọn đúng tên). */
+export async function listCcnStatuses(pool: sql.ConnectionPool): Promise<string[]> {
+  const rows = (
+    await pool.request().query(`SELECT DISTINCT RTRIM(LTRIM(StatusName)) AS name FROM Qzen_AAPL.CCN_ObjectStatus WHERE StatusName IS NOT NULL`)
+  ).recordset;
+  return rows.map((r: any) => r.name as string).filter(Boolean).sort();
 }
 
 const CCN_FROM = `
@@ -505,6 +516,12 @@ function ccnWhere(request: sql.Request, f: CcnFilters): Where {
   }
   where.mentionsDocument(CCN_TEXT_COLUMNS, f.relatedDocPatterns);
   where.dateRange("c.CCN_Date", f.createdFrom, f.createdTo);
+  // So sánh "=" của SQL Server bỏ qua khoảng trắng cuối ("... by Head QA " trong dữ liệu)
+  const statusList = (names: string[]) => names.slice(0, 20).map((n) => where.param(sql.NVarChar, n.trim())).join(", ");
+  if (f.statusIn?.length) where.add(`LTRIM(s.StatusName) IN (${statusList(f.statusIn)})`);
+  if (f.statusNotIn?.length) {
+    where.add(`(s.StatusName IS NULL OR LTRIM(s.StatusName) NOT IN (${statusList(f.statusNotIn)}))`);
+  }
   return where;
 }
 

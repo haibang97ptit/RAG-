@@ -11,6 +11,7 @@ import {
   getActionItemDetail,
   getCapaDetail,
   getCcnDetail,
+  listCcnStatuses,
   searchActionItems,
   searchCapas,
   searchCcns,
@@ -42,6 +43,9 @@ export interface QualzenPlan {
   // Phiếu có nội dung nhắc tới các tài liệu này (vd CCN đề xuất sửa SOP nào)
   relatedDocuments: string[];
   relatedDocPatterns: string[];
+  // CCN: chỉ lấy / bỏ các trạng thái này (tên đúng như trong hệ thống)
+  ccnStatusIn: string[];
+  ccnStatusNotIn: string[];
 }
 
 // Mã phiếu đầy đủ: AI/FRM/QC/2026/1139, PCC/FRM/IT/2026/009, CAPA/FRM/QC/2026/136
@@ -175,6 +179,8 @@ const emptyPlan = (module: Module): QualzenPlan => ({
   listAll: false,
   relatedDocuments: [],
   relatedDocPatterns: [],
+  ccnStatusIn: [],
+  ccnStatusNotIn: [],
 });
 
 const PLANNER_PROMPT = `Bạn phân tích câu hỏi cho trợ lý nội bộ của công ty dược. Có 2 nguồn trả lời:
@@ -183,7 +189,7 @@ const PLANNER_PROMPT = `Bạn phân tích câu hỏi cho trợ lý nội bộ c�
 Nếu không chắc → "sop".
 
 Trả về DUY NHẤT một JSON, không giải thích:
-{"source":"qualzen|sop","module":"action_item|ccn|capa","number":null,"source_number":null,"source_type":null,"department":null,"status":null,"person":null,"keyword":null,"from_date":null,"to_date":null,"date_field":null,"list_all":false}
+{"source":"qualzen|sop","module":"action_item|ccn|capa","number":null,"source_number":null,"source_type":null,"department":null,"status":null,"person":null,"keyword":null,"from_date":null,"to_date":null,"date_field":null,"list_all":false,"ccn_status":[],"ccn_status_exclude":[]}
 
 Ý nghĩa các trường (để null nếu câu hỏi không nhắc tới):
 - module: loại phiếu người dùng muốn XEM. "action item của CCN 009" → action_item; "CCN 009 đang ở bước nào" → ccn.
@@ -195,9 +201,36 @@ Trả về DUY NHẤT một JSON, không giải thích:
 - keyword: CHỈ khi người dùng muốn tìm theo nội dung; 1-3 từ lấy nguyên từ câu hỏi. Không đưa các từ chung như "action item", "CCN", "phiếu".
 - from_date, to_date: khoảng ngày, định dạng YYYY-MM-DD, tính từ ngày hôm nay được cho bên dưới. Một ngày cụ thể → from_date = to_date. "tháng 9" → từ ngày 01 đến ngày cuối tháng 9 của năm nay.
 - date_field: khoảng ngày trên áp vào ngày nào: "created" (ngày tạo - mặc định), "target" (hạn hoàn thành, vd "đến hạn trong tuần này", "hạn trước 20/10"), "closed" (ngày đóng, vd "đã đóng trong tháng 9"). target/closed chỉ dùng cho action_item.
-- list_all: true khi người dùng muốn xem HẾT danh sách ("liệt kê hết", "tất cả", "toàn bộ", "đầy đủ", "xem tiếp phần còn lại"). Mặc định false.`;
+- list_all: true khi người dùng muốn xem HẾT danh sách ("liệt kê hết", "tất cả", "toàn bộ", "đầy đủ", "xem tiếp phần còn lại"). Mặc định false.
+- ccn_status, ccn_status_exclude (chỉ cho ccn): lọc theo trạng thái CCN. ccn_status = CHỈ lấy các trạng thái này; ccn_status_exclude = lấy tất cả TRỪ các trạng thái này ("trừ", "bỏ", "không tính", "ngoại trừ"). Chép ĐÚNG tên trong danh sách "Trạng thái CCN có trong hệ thống" được cho bên dưới; một ý của người dùng có thể ứng với nhiều trạng thái (vd "đã đóng" → các trạng thái Closed; "nháp" → các trạng thái Draft). Không nhắc tới trạng thái → để [].`;
 
-function parsePlan(raw: string): QualzenPlan | "sop" | null {
+/** Giữ các tên trạng thái LLM chọn có thật trong hệ thống (không phân biệt hoa thường, khoảng trắng). */
+function pickStatuses(value: unknown, known: string[]): string[] {
+  if (!Array.isArray(value)) return [];
+  const byKey = new Map(known.map((name) => [name.toLowerCase().replace(/\s+/g, " ").trim(), name]));
+  const picked = value
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => byKey.get(v.toLowerCase().replace(/\s+/g, " ").trim()))
+    .filter((v): v is string => !!v);
+  return Array.from(new Set(picked));
+}
+
+// Danh sách trạng thái CCN ít khi đổi: đọc một lần mỗi 30 phút
+const STATUS_CACHE_MS = 30 * 60 * 1000;
+let ccnStatusCache: { names: string[]; at: number } | null = null;
+
+async function getCcnStatuses(): Promise<string[]> {
+  if (ccnStatusCache && Date.now() - ccnStatusCache.at < STATUS_CACHE_MS) return ccnStatusCache.names;
+  try {
+    ccnStatusCache = { names: await listCcnStatuses(await getQualzenPool()), at: Date.now() };
+    return ccnStatusCache.names;
+  } catch (err) {
+    console.warn("Không đọc được danh sách trạng thái CCN:", (err as Error).message);
+    return ccnStatusCache?.names ?? [];
+  }
+}
+
+function parsePlan(raw: string, ccnStatuses: string[]): QualzenPlan | "sop" | null {
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return null;
   let json: any;
@@ -230,6 +263,8 @@ function parsePlan(raw: string): QualzenPlan | "sop" | null {
     listAll: json.list_all === true,
     relatedDocuments: [],
     relatedDocPatterns: [],
+    ccnStatusIn: pickStatuses(json.ccn_status, ccnStatuses),
+    ccnStatusNotIn: pickStatuses(json.ccn_status_exclude, ccnStatuses),
   };
 }
 
@@ -264,11 +299,14 @@ async function planQuery(query: string, history: ChatMessage[]): Promise<Qualzen
     .join("\n");
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Ho_Chi_Minh" }).format(new Date());
 
+  const ccnStatuses = await getCcnStatuses();
+  const statusHint = ccnStatuses.length > 0 ? `\n\nTrạng thái CCN có trong hệ thống: ${ccnStatuses.join(" | ")}` : "";
+
   const raw = await callRouter(
     PLANNER_PROMPT,
-    `Hôm nay: ${today}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`
+    `Hôm nay: ${today}${statusHint}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`
   );
-  const plan = parsePlan(raw);
+  const plan = parsePlan(raw, ccnStatuses);
   if (plan === "sop" || plan === null) return null;
   // LLM chọn QualZen và câu hỏi có nhắc mã tài liệu (không phải mã của chính phiếu) → lọc theo tài liệu đó
   if (docRefs.length > 0) {
@@ -306,6 +344,8 @@ function describeFilters(plan: QualzenPlan): Record<string, string> {
   if (plan.fromDate || plan.toDate) {
     filters.khoangNgay = `${dateLabel} từ ${plan.fromDate ?? "…"} đến ${plan.toDate ?? "…"}`;
   }
+  if (plan.ccnStatusIn.length > 0) filters.chiLayTrangThai = plan.ccnStatusIn.join(", ");
+  if (plan.ccnStatusNotIn.length > 0) filters.boQuaTrangThai = plan.ccnStatusNotIn.join(", ");
   if (plan.listAll) filters.lietKeHet = `có (tối đa ${FULL_LIST_LIMIT} phiếu)`;
   return filters;
 }
@@ -344,6 +384,8 @@ async function runPlan(plan: QualzenPlan): Promise<Record<string, unknown>> {
       person: plan.person,
       keyword: plan.keyword,
       relatedDocPatterns: plan.relatedDocPatterns,
+      statusIn: plan.ccnStatusIn,
+      statusNotIn: plan.ccnStatusNotIn,
       ...dates,
     }, limit, textChars);
     const { _rows, ...listing } = result;
