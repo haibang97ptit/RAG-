@@ -1,0 +1,41 @@
+﻿Thuật ngữ (các cách gọi, cách nhau bằng |),Giải thích
+CCN | phiếu thay đổi | phiếu kiểm soát thay đổi | kiểm soát thay đổi | change control | PCC,"Change Control: phiếu đề xuất thay đổi trong hệ thống QualZen, mã dạng PCC/FRM/<phòng>/<năm>/<số>"
+action item | hành động cần làm | việc cần làm,"Action Item: việc cần thực hiện phát sinh từ CCN hoặc CAPA, mã dạng AI/FRM/<phòng>/<năm>/<số>"
+CAPA | hành động khắc phục phòng ngừa | khắc phục phòng ngừa | corrective action | preventive action,"Corrective and Preventive Action: hành động khắc phục và phòng ngừa, mã dạng CAPA/FRM/<phòng>/<năm>/<số>"
+sai lệch | deviation | DR,"Deviation: sai lệch so với quy trình đã phê duyệt, mã dạng DR/..."
+OOS | kết quả ngoài tiêu chuẩn | out of specification,Out of Specification: kết quả kiểm nghiệm nằm ngoài tiêu chuẩn
+sự cố phòng thí nghiệm | lab incident | LIR,"Lab Incident: sự cố trong phòng thí nghiệm, mã dạng LIR/..."
+biểu mẫu | BM | form | format,"Biểu mẫu của một SOP, ký hiệu F trong mã tài liệu (vd ...-F01-02)"
+phụ lục | PL | appendix,"Phụ lục của một SOP, ký hiệu A trong mã tài liệu (vd ...-A03-01)"
+mã cũ | mã kiểu cũ | P.IT | P.QA | P.QC,Mã tài liệu kiểu cũ P.<phòng>.1xxx tương ứng mã mới FRM/<phòng>/SOP-.../0xxx (vd P.IT.1001 = FRM/IT/SOP-GEN/0001)
+tự thanh tra | tự kiểm tra | self inspection | internal audit,Self inspection: tự thanh tra GMP nội bộ
+hiệu chuẩn | calibration,Calibration: hiệu chuẩn thiết bị đo
+thẩm định | validation,"Validation: thẩm định quy trình, phương pháp, hệ thống"
+đánh giá thiết bị | qualification | IQ | OQ | PQ,Qualification: đánh giá lắp đặt / vận hành / hiệu năng thiết bị
+hồ sơ lô | batch record | BMR | BPR,Batch record: hồ sơ sản xuất / đóng gói lô
+đào tạo | huấn luyện | training,Training: đào tạo nhân viên
+khiếu nại | complaint,Complaint: khiếu nại về sản phẩm
+thu hồi | recall,Recall: thu hồi sản phẩm
+quản lý rủi ro chất lượng | đánh giá rủi ro | QRM | quality risk management | risk assessment,Quality Risk Management: quản lý rủi ro chất lượng
+kiểm soát tài liệu | quản lý tài liệu | document control,Document control: kiểm soát / ban hành / thu hồi tài liệu
+nhà cung cấp | vendor | supplier,Vendor / supplier: nhà cung cấp nguyên vật liệu và dịch vụ
+độ ổn định | stability,Stability: nghiên cứu độ ổn định
+phòng sạch | cleanroom | clean room,Cleanroom: phòng sạch
+vệ sinh | làm sạch | cleaning | sanitization,Cleaning / sanitization: vệ sinh
+mật khẩu | password,Password: mật khẩu
+quyền truy cập | phân quyền | access privilege | access control,Access privilege: quyền truy cập hệ thống
+sao lưu | backup,Backup: sao lưu dữ liệu
+bảo trì | bảo dưỡng | maintenance,Maintenance: bảo trì thiết bị
+nguyên liệu bị loại | hàng bị loại | rejected material,Rejected materials: nguyên vật liệu / sản phẩm bị loại
+QA | đảm bảo chất lượng | quality assurance,Phòng ban: Phòng Đảm bảo chất lượng (Quality Assurance)
+QC | kiểm tra chất lượng | kiểm nghiệm | quality control,Phòng ban: Phòng Kiểm tra chất lượng (Quality Control)
+PD | sản xuất | production,Phòng ban: Phòng Sản xuất (Production)
+WH | kho | warehouse,Phòng ban: Kho (Warehouse)
+ME | cơ điện | mechanical and electrical,Phòng ban: Phòng Cơ điện (Mechanical and Electrical)
+IT | công nghệ thông tin,Phòng ban: Phòng Công nghệ thông tin
+HR | nhân sự | hành chính nhân sự,Phòng ban: Phòng Nhân sự hành chính
+RA | đăng ký thuốc | regulatory affairs,Phòng ban: Phòng Đăng ký (Regulatory Affairs)
+FD | phát triển công thức | formulation development,Phòng ban: Phòng Phát triển công thức (Formulation Development)
+AD | phát triển phương pháp phân tích | analytical development,Phòng ban: Phòng Phát triển phân tích (Analytical Development)
+PU | kế hoạch cung ứng | cung ứng | mua hàng | supply chain,Phòng ban: Phòng Kế hoạch - Cung ứng (Plan - Supply chain)
+TS | dịch vụ kỹ thuật | technical service,Phòng ban: Phòng Dịch vụ kỹ thuật (Technical Service)

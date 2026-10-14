@@ -34,6 +34,7 @@ rsync -av --delete --delete-excluded \
     --include='*.pdf' --include='*.docx' --include='*.doc' \
     --include='*.xlsx' --include='*.xls' \
     --include='*.txt' --include='*.md' \
+    --include='/glossary.csv' \
     --exclude='*' \
     "$SOURCE/" "$TARGET/" \
     --log-file=/var/log/sop-rsync.log

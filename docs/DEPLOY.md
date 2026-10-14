@@ -219,6 +219,45 @@ curl -X DELETE http://localhost:6333/collections/sop_documents
 
 Quay lại collection cũ: đổi `COLLECTION_NAME` về giá trị cũ rồi `$DC up -d`.
 
+## Bật tìm kiếm theo từ khóa + tên mục (cần index lại một lần)
+
+Từ bản có `sparseVector.ts`, mỗi đoạn được lưu kèm tên tài liệu, tên mục và vector từ khóa
+(tìm đúng hơn với mã số, tên thiết bị: "F17", "HPLC-05", "SOP 5" ↔ "0005"). Collection có sẵn
+không thêm được loại vector này, nên bot vẫn chạy kiểu cũ (chỉ tìm theo nghĩa) cho tới khi
+index sang collection MỚI theo đúng mục trên, với một tên chưa dùng bao giờ, vd:
+
+```bash
+$DC exec -e COLLECTION_NAME=sop_documents_v3 backend npm run ingest:incremental
+```
+
+Log khởi động backend sẽ ghi "Created collection ... (tìm theo nghĩa + từ khóa)" khi tạo collection mới.
+
+## Học từ câu hỏi thật
+
+**Phản hồi người dùng.** Mỗi câu hỏi (kèm cách bot hiểu, câu trả lời) và mỗi lần bấm 👍/👎 được
+ghi vào `/app/state/logs/*.jsonl` (volume `backend_state`). Xem báo cáo:
+
+```bash
+$DC exec backend npm run feedback:report          # 30 ngày; thêm "-- 7" cho 7 ngày
+$DC exec backend cat /app/state/feedback-report.md
+```
+
+Báo cáo liệt kê câu bị 👎, góp ý của người dùng, bot đã hiểu câu đó thế nào, và có sẵn mẫu để
+thêm vào `backend/src/knowledge/router-examples.json` (sửa "route" cho đúng trước khi thêm).
+
+**Bộ ví dụ cho bước hiểu câu hỏi:** `backend/src/knowledge/router-examples.json`. Mỗi câu hỏi,
+bot chọn 6 ví dụ giống nhất đưa cho model làm mẫu. Thêm ví dụ từ các câu bị hiểu sai, rồi đo:
+
+```bash
+cd backend && npm run eval:router     # trên máy dev, dùng GROQ_API_KEY trong backend/.env
+```
+
+**Bảng thuật ngữ:** mặc định ở `backend/src/knowledge/glossary.csv`. QA có thể tự bổ sung bằng
+file `glossary.xlsx` (hoặc `glossary.csv`) ở THƯ MỤC GỐC của thư mục tài liệu chung: cột 1 là các
+cách gọi cách nhau bằng `|`, cột 2 là giải thích. File được đồng bộ cùng tài liệu và bot tự đọc lại
+khi file đổi, không cần deploy. Giải thích bắt đầu bằng "Phòng ban:" thì chỉ dùng để nhận diện
+phòng ban.
+
 ## Nâng cấp từ bản chưa có auth / chunk 3000
 
 Thứ tự này để user đang dùng app bản cũ không bị gián đoạn:

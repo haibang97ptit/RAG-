@@ -228,6 +228,9 @@ export async function walkDirectory(dir: string): Promise<string[]> {
       } else if (entry.name.startsWith("~$")) {
         // File khóa tạm của Word/Excel (tạo ra khi có người đang mở tài liệu) - không phải tài liệu thật
         continue;
+      } else if (/^glossary\.(xlsx|csv)$/i.test(entry.name)) {
+        // Bảng thuật ngữ (glossary.ts đọc riêng), không phải tài liệu SOP
+        continue;
       } else if (allowedExts.has(path.extname(entry.name).toLowerCase())) {
         files.push(fullPath);
       }

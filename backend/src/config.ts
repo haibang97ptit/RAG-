@@ -54,6 +54,8 @@ export const config = {
   cacheDir: process.env.CACHE_DIR || "./.cache",
   dataDir,
   manifestPath: path.join(manifestDir, `.ingest-manifest.${collectionName}.json`),
+  // Nhật ký câu hỏi + phản hồi 👍/👎 (trên server là volume /app/state, giữ qua các lần deploy)
+  stateDir: process.env.STATE_DIR || manifestDir,
   enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
   // Tra cứu hồ sơ QualZen (Action Item, CCN, CAPA) - bật khi có đủ QUALZEN_DB_*
   qualzenEnabled: qualzenSettingsFromEnv() !== null,

@@ -8,7 +8,7 @@ import type { IndexedFile } from "./qdrantService.js";
  * file đã index. Danh sách do server tự in; LLM chỉ nhận số liệu để viết phần mở đầu.
  */
 
-type DocType = "sop" | "form" | "appendix";
+export type DocType = "sop" | "form" | "appendix";
 
 const WORD_START = "(?<![\\p{L}\\p{N}])";
 const WORD_END = "(?![\\p{L}\\p{N}])";
@@ -176,12 +176,20 @@ function renderList(entries: DocumentEntry[], types: DocType[], groupByCategory:
   return `\n\n${lines.join("\n")}`;
 }
 
+export interface InventoryOptions {
+  files?: IndexedFile[]; // để thử nghiệm; mặc định đọc từ Qdrant
+  // Bước hiểu câu hỏi đã xác định đây là câu hỏi về kho: bỏ qua nhận diện bằng từ khóa,
+  // và dùng các thông tin nó đã tách ra (trống = tự nhận diện từ câu hỏi như cũ)
+  routed?: boolean;
+  departments?: string[];
+  docTypes?: DocType[];
+  wantsList?: boolean;
+}
+
 /** Trả lời câu hỏi về kho tài liệu; null nếu không phải loại câu hỏi này (hoặc không đọc được danh mục). */
-export async function inventoryReplyFor(
-  query: string,
-  indexedFiles?: IndexedFile[] // để thử nghiệm; mặc định đọc từ Qdrant
-): Promise<InventoryReply | null> {
-  if (!isInventoryQuestion(query)) return null;
+export async function inventoryReplyFor(query: string, options: InventoryOptions = {}): Promise<InventoryReply | null> {
+  if (!options.routed && !isInventoryQuestion(query)) return null;
+  const indexedFiles = options.files;
 
   let files: IndexedFile[];
   try {
@@ -193,9 +201,12 @@ export async function inventoryReplyFor(
   if (files.length === 0) return null;
 
   const text = query.normalize("NFC");
-  const types = TYPE_WORDS.find(([, re]) => re.test(text))?.[0] ?? ["sop"];
+  const types = options.docTypes?.length
+    ? options.docTypes
+    : (TYPE_WORDS.find(([, re]) => re.test(text))?.[0] ?? ["sop"]);
   const categories = Array.from(new Set(files.map((f) => f.category))).sort();
-  const departments = departmentsIn(text, categories);
+  const routedDepartments = (options.departments ?? []).filter((d) => categories.includes(d));
+  const departments = routedDepartments.length > 0 ? routedDepartments : departmentsIn(text, categories);
   // Nhắc tới phòng ban không có trong kho ("phòng HR") → kết quả 0, không phải đếm cả công ty
   const missingDepartments = departments.length === 0 ? mentionedDepartmentCodes(text).map((c) => c.toUpperCase()) : [];
 
@@ -203,7 +214,7 @@ export async function inventoryReplyFor(
     missingDepartments.length > 0 ? false : departments.length === 0 || departments.includes(f.category)
   );
   const entries = collectDocuments(inScope).filter((e) => types.includes(e.type));
-  const wantsList = LIST_WORDS.test(text) || entries.length <= COUNT_ONLY_LIST_LIMIT;
+  const wantsList = options.wantsList === true || LIST_WORDS.test(text) || entries.length <= COUNT_ONLY_LIST_LIMIT;
 
   const summary = {
     phamVi:

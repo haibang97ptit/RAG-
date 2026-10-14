@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { config } from "./config.js";
-import { initEmbedder, embed } from "./embedding.js";
+import { initEmbedder } from "./embedding.js";
 import {
   ensureCollection,
   upsertPoints,
@@ -12,7 +12,7 @@ import {
   type PointToInsert,
 } from "./qdrantService.js";
 import { readFile, walkDirectory } from "./fileReaders.js";
-import { chunkText } from "./chunker.js";
+import { buildPointsForDocument } from "./chunkPoints.js";
 
 const BATCH_SIZE = 32;
 const MANIFEST_PATH = config.manifestPath;
@@ -67,15 +67,6 @@ async function hashFile(filePath: string): Promise<{ hash: string; mtime: number
   return { hash, mtime: stat.mtimeMs, size: stat.size };
 }
 
-function makePointId(filePath: string, chunkIndex: number, sheetName?: string): number {
-  const key = `${filePath}::${sheetName || ""}::${chunkIndex}`;
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash);
-}
-
 /**
  * Index (hoặc index lại) 1 file. Parse + embed xong hết rồi mới xóa chunks cũ và upsert,
  * nên file lỗi parse/embed không làm mất dữ liệu đang có.
@@ -86,32 +77,7 @@ async function indexFile(filePath: string): Promise<number> {
   const points: PointToInsert[] = [];
 
   for (const doc of docs) {
-    const chunks = chunkText(doc.text, {
-      chunkSize: config.chunkSize,
-      chunkOverlap: config.chunkOverlap,
-    });
-
-    for (let j = 0; j < chunks.length; j += BATCH_SIZE) {
-      const batch = chunks.slice(j, j + BATCH_SIZE);
-      const vectors = await embed(batch);
-
-      batch.forEach((text, k) => {
-        const globalIdx = points.length;
-        points.push({
-          id: makePointId(filePath, globalIdx, doc.metadata.sheetName),
-          vector: vectors[k],
-          payload: {
-            text,
-            fileName: doc.metadata.fileName,
-            filePath: doc.metadata.filePath,
-            category: doc.metadata.category,
-            fileType: doc.metadata.fileType,
-            sheetName: doc.metadata.sheetName,
-            chunkIndex: globalIdx,
-          },
-        });
-      });
-    }
+    points.push(...(await buildPointsForDocument(doc, points.length)));
   }
 
   await deleteByFilePath(filePath);

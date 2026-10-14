@@ -268,7 +268,7 @@ function parsePlan(raw: string, ccnStatuses: string[]): QualzenPlan | "sop" | nu
   };
 }
 
-async function planQuery(query: string, history: ChatMessage[]): Promise<QualzenPlan | null> {
+async function planQuery(query: string, history: ChatMessage[], routed = false): Promise<QualzenPlan | null> {
   // Có mã đầy đủ thì không cần LLM: tra thẳng phiếu đó
   const normalized = cleanCodeText(query);
   const codes = FULL_CODE.map(([module, re]) => ({ module, match: normalized.match(re) })).filter((c) => c.match);
@@ -302,9 +302,11 @@ async function planQuery(query: string, history: ChatMessage[]): Promise<Qualzen
   const ccnStatuses = await getCcnStatuses();
   const statusHint = ccnStatuses.length > 0 ? `\n\nTrạng thái CCN có trong hệ thống: ${ccnStatuses.join(" | ")}` : "";
 
+  // Bước hiểu câu hỏi đã xác định là hỏi hồ sơ: nói rõ để bước lập kế hoạch không chọn lại "sop"
+  const routedHint = routed ? `\n\nGhi chú: câu hỏi này đã được xác định là hỏi về HỒ SƠ trong QualZen → "source" là "qualzen".` : "";
   const raw = await callRouter(
     PLANNER_PROMPT,
-    `Hôm nay: ${today}${statusHint}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`
+    `Hôm nay: ${today}${statusHint}${routedHint}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`
   );
   const plan = parsePlan(raw, ccnStatuses);
   if (plan === "sop" || plan === null) return null;
@@ -497,9 +499,10 @@ function renderList(module: Module, data: Record<string, any>, groupByDepartment
  */
 export async function answerDataForQualzen(
   query: string,
-  history: ChatMessage[]
+  history: ChatMessage[],
+  routed = false // bước hiểu câu hỏi đã xác định là hỏi hồ sơ QualZen
 ): Promise<QualzenAnswerData | null> {
-  const plan = await planQuery(query, history);
+  const plan = await planQuery(query, history, routed);
   if (!plan) return null;
 
   const queriedAt = formatDate(new Date()) ?? "";

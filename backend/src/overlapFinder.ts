@@ -537,7 +537,9 @@ export async function findOverlapContext(
   query: string,
   catalog: CatalogMatch | null,
   wantsCompare: boolean,
-  wantsOverlap: boolean
+  wantsOverlap: boolean,
+  // Bước hiểu câu hỏi đã tách sẵn chủ đề (null = rà chung) và phòng ban; không có thì tự nhận diện như cũ
+  routed?: { topic: string | null; department: string | null }
 ): Promise<OverlapContext | null> {
   // Danh mục bị cắt bớt = con số trong câu hỏi nhiều khả năng không phải mã tài liệu
   const groups = catalog && catalog.total <= catalog.files.length ? catalog.groups : [];
@@ -549,6 +551,9 @@ export async function findOverlapContext(
   if (groups.length === 1) return compareWithOthers(groups[0]);
 
   // Không nêu SOP nào: có chủ đề cụ thể thì tìm theo chủ đề, không thì quét cả kho
+  if (routed) {
+    return routed.topic ? findTopicAcrossDocuments(routed.topic) : scanWholeCorpus(routed.department);
+  }
   const categories = Array.from(new Set((await getIndexedFiles()).map((f) => f.category)));
   const scan = detectCorpusScan(query, categories);
   return scan ? scanWholeCorpus(scan.department) : findTopicAcrossDocuments(query);

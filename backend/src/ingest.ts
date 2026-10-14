@@ -1,25 +1,11 @@
 import path from "path";
 import { config } from "./config.js";
-import { initEmbedder, embed } from "./embedding.js";
-import {
-  ensureCollection,
-  upsertPoints,
-  countPoints,
-  type PointToInsert,
-} from "./qdrantService.js";
+import { initEmbedder } from "./embedding.js";
+import { ensureCollection, upsertPoints, countPoints } from "./qdrantService.js";
 import { readFile, walkDirectory } from "./fileReaders.js";
-import { chunkText } from "./chunker.js";
+import { buildPointsForDocument } from "./chunkPoints.js";
 
 const BATCH_SIZE = 32;
-
-function makePointId(filePath: string, chunkIndex: number, sheetName?: string): number {
-  const key = `${filePath}::${sheetName || ""}::${chunkIndex}`;
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash);
-}
 
 async function ingest() {
   const reset = process.argv.includes("--reset");
@@ -65,38 +51,11 @@ async function ingest() {
       let fileChunks = 0;
 
       for (const doc of docs) {
-        const chunks = chunkText(doc.text, {
-          chunkSize: config.chunkSize,
-          chunkOverlap: config.chunkOverlap,
-        });
-
-        if (chunks.length === 0) continue;
-
-        for (let j = 0; j < chunks.length; j += BATCH_SIZE) {
-          const batch = chunks.slice(j, j + BATCH_SIZE);
-          const vectors = await embed(batch);
-
-          const points: PointToInsert[] = batch.map((text, k) => {
-            const globalIdx = fileChunks + j + k;
-            return {
-              id: makePointId(filePath, globalIdx, doc.metadata.sheetName),
-              vector: vectors[k],
-              payload: {
-                text,
-                fileName: doc.metadata.fileName,
-                filePath: doc.metadata.filePath,
-                category: doc.metadata.category,
-                fileType: doc.metadata.fileType,
-                sheetName: doc.metadata.sheetName,
-                chunkIndex: globalIdx,
-              },
-            };
-          });
-
-          await upsertPoints(points);
+        const points = await buildPointsForDocument(doc, fileChunks);
+        for (let j = 0; j < points.length; j += BATCH_SIZE) {
+          await upsertPoints(points.slice(j, j + BATCH_SIZE));
         }
-
-        fileChunks += chunks.length;
+        fileChunks += points.length;
       }
 
       totalChunks += fileChunks;

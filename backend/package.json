@@ -11,6 +11,8 @@
     "ingest:incremental": "npx tsx src/incrementalIngest.ts",
   "qualzen:explore": "npx tsx src/qualzenExplore.ts",
   "qualzen:smoke": "npx tsx src/qualzenSmoke.ts",
+    "eval:router": "npx tsx src/routerEval.ts",
+    "feedback:report": "npx tsx src/feedbackReport.ts",
     "build": "tsc",
     "type-check": "tsc --noEmit"
   },

@@ -13,10 +13,8 @@ import {
   type SearchResult,
 } from "./qdrantService.js";
 import {
-  classifyIntent,
   classifyComplexity,
   isOverviewQuestion,
-  rewriteFollowUpQuery,
   expandQuery,
   generateHypotheticalAnswer,
   rerankChunks,
@@ -34,9 +32,12 @@ import {
   type Intent,
 } from "./llmService.js";
 import { selectDisplayedSources, type UiSource } from "./citedSources.js";
-import { answerDataForQualzen, looksLikeQualzenQuestion, QUALZEN_LIST_HEADING } from "./qualzenAssistant.js";
+import { answerDataForQualzen, QUALZEN_LIST_HEADING } from "./qualzenAssistant.js";
 import { findOverlapContext, type OverlapContext } from "./overlapFinder.js";
-import { INVENTORY_LIST_HEADING, inventoryReplyFor, isInventoryQuestion } from "./docInventory.js";
+import { INVENTORY_LIST_HEADING, inventoryReplyFor } from "./docInventory.js";
+import { routeQuery, type RoutedQuery } from "./queryRouter.js";
+import { expandWithGlossary } from "./glossary.js";
+import { logFeedback, logInteraction } from "./interactionLog.js";
 import {
   findCatalogForQuery,
   isMainDocument,
@@ -158,9 +159,9 @@ function focusPathsOf(catalog: CatalogMatch | null): string[] {
  * cần lấy phần mở đầu: SOP chính trong danh mục (không phải biểu mẫu/phụ lục).
  * Nếu user hỏi đích danh một biểu mẫu/phụ lục thì không áp dụng (để vector search xử lý).
  */
-function overviewPathsOf(query: string, catalog: CatalogMatch | null): string[] {
+function overviewPathsOf(query: string, catalog: CatalogMatch | null, wantsOverview: boolean): string[] {
   const focus = focusPathsOf(catalog);
-  if (focus.length === 0 || !isOverviewQuestion(query) || mentionsFormOrAppendix(query)) return [];
+  if (focus.length === 0 || !wantsOverview || mentionsFormOrAppendix(query)) return [];
 
   const mainDocs = catalog!.files.filter((f) => isMainDocument(f.fileName)).map((f) => f.filePath);
   return mainDocs.length > 0 ? mainDocs : focus;
@@ -190,14 +191,15 @@ async function enhancedRetrieve(
    * không biết chunk nào thuộc SOP nào. Vẫn tìm thêm trên toàn bộ (ít hơn) để không bỏ sót
    * khi con số trong câu hỏi không phải mã tài liệu.
    */
-  const searchWithFocus = async (vec: number[]) => {
+  // keywordText: câu hỏi gốc, để tìm kết hợp theo từ khóa (mã số, tên thiết bị...) nếu collection hỗ trợ
+  const searchWithFocus = async (vec: number[], keywordText: string) => {
     if (focusFilePaths.length === 0) {
-      for (const r of await searchSimilar(vec, config.topK)) addResult(r);
+      for (const r of await searchSimilar(vec, config.topK, undefined, undefined, keywordText)) addResult(r);
       return;
     }
     const [focused, general] = await Promise.all([
-      searchSimilar(vec, config.topK, focusFilePaths),
-      searchSimilar(vec, Math.ceil(config.topK / 2)),
+      searchSimilar(vec, config.topK, focusFilePaths, undefined, keywordText),
+      searchSimilar(vec, Math.ceil(config.topK / 2), undefined, undefined, keywordText),
     ]);
     stats.focused_candidates = focused.length;
     for (const r of focused) addResult(r);
@@ -215,7 +217,7 @@ async function enhancedRetrieve(
     const perFile = Math.max(1, Math.ceil(openingBudget / overviewFilePaths.length));
     const [opening, similar] = await Promise.all([
       fetchOpeningChunks(overviewFilePaths, perFile),
-      embedQuery(query).then((vec) => searchSimilar(vec, config.topK, focusFilePaths)),
+      embedQuery(query).then((vec) => searchSimilar(vec, config.topK, focusFilePaths, undefined, query)),
     ]);
     for (const r of opening.slice(0, openingBudget)) addResult(r);
     stats.opening_chunks = allResults.length;
@@ -229,7 +231,7 @@ async function enhancedRetrieve(
   // ============== SIMPLE PIPELINE (khi flag off) ==============
   if (!config.enhancedRetrieval) {
     stats.mode = "simple";
-    await searchWithFocus(await embedQuery(query));
+    await searchWithFocus(await embedQuery(query), query);
     const reranked = await rerankChunks(query, allResults, config.rerankTopK);
     stats.unique_candidates = allResults.length;
     stats.reranked_count = reranked.length;
@@ -247,14 +249,14 @@ async function enhancedRetrieve(
   stats.hyde_length = hypothetical.length;
 
   const primaryText = hypothetical ? `${query}\n\n${hypothetical}` : query;
-  await searchWithFocus(await embedQuery(primaryText));
+  await searchWithFocus(await embedQuery(primaryText), query);
 
   const secondaryK = Math.max(5, Math.floor(config.topK / 2));
   await Promise.all(
     variants.map(async (variant) => {
       try {
         const vec = await embedQuery(variant);
-        const results = await searchSimilar(vec, secondaryK);
+        const results = await searchSimilar(vec, secondaryK, undefined, undefined, variant);
         for (const r of results) addResult(r);
       } catch (err) {
         fastify.log.warn(`Variant search failed: ${(err as Error).message}`);
@@ -295,27 +297,6 @@ fastify.get("/stats", async () => {
   };
 });
 
-/**
- * Câu hỏi rà quy định trùng lặp / so sánh giữa các SOP → các cặp đoạn gần nghĩa nhất để LLM phân tích.
- * Trả về null nếu không phải dạng câu hỏi này (đi tiếp luồng tìm kiếm thông thường).
- */
-async function overlapContextFor(query: string, catalog: CatalogMatch | null): Promise<OverlapContext | null> {
-  const wantsOverlap = isOverlapQuestion(query);
-  const wantsCompare = isCompareQuestion(query);
-  if (!wantsOverlap && !wantsCompare) return null;
-
-  try {
-    return await findOverlapContext(query, catalog, wantsCompare, wantsOverlap);
-  } catch (err) {
-    fastify.log.warn(`Overlap analysis failed: ${(err as Error).message}`);
-    return null;
-  }
-}
-
-/**
- * Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) → system prompt chứa dữ liệu truy vấn được.
- * Trả về null nếu tính năng tắt hoặc câu hỏi là về tài liệu SOP (đi tiếp luồng RAG bình thường).
- */
 interface PreparedReply {
   prompt: string;
   maxTokens: number;
@@ -323,15 +304,14 @@ interface PreparedReply {
   list: { markdown: string; fallbackIntro: string } | null;
 }
 
-async function qualzenReplyFor(query: string, history: ChatMessage[]): Promise<PreparedReply | null> {
+/**
+ * Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) → system prompt chứa dữ liệu truy vấn được.
+ * Trả về null nếu tính năng tắt hoặc bước lập kế hoạch thấy đây là câu hỏi về tài liệu SOP.
+ */
+async function qualzenReplyFor(query: string, history: ChatMessage[], routed: boolean): Promise<PreparedReply | null> {
   if (!config.qualzenEnabled) return null;
 
-  // Câu hỏi tiếp nối ("còn cái nào quá hạn?") không tự chứa từ khóa → xét cả lượt hỏi-đáp gần nhất.
-  // Không dựa vào intent vì bộ phân loại có thể coi câu đó là câu hỏi mới.
-  const recentContext = history.slice(-2).map((m) => m.content.slice(0, 500)).join("\n");
-  if (!looksLikeQualzenQuestion(`${query}\n${recentContext}`)) return null;
-
-  const data = await answerDataForQualzen(query, history);
+  const data = await answerDataForQualzen(query, history, routed);
   if (!data) return null;
 
   fastify.log.info({ query, plan: data.plan, serverList: !!data.list, promptChars: data.dataJson.length }, "qualzen_query");
@@ -344,30 +324,45 @@ async function qualzenReplyFor(query: string, history: ChatMessage[]): Promise<P
     : { prompt: buildQualzenSystemPrompt(data.dataJson, data.queriedAt), maxTokens: QUALZEN_MAX_ANSWER_TOKENS, list: null };
 }
 
-/**
- * "Phòng QA có bao nhiêu SOP", "liệt kê biểu mẫu của IT": đếm trên danh mục file thay vì đoạn trích.
- * Câu tiếp nối ("còn phòng QC?") ngay sau một câu loại này được viết lại thành câu độc lập rồi xét lại.
- */
-async function inventoryReplyForQuery(
-  query: string,
-  intent: Intent,
-  history: ChatMessage[]
-): Promise<PreparedReply | null> {
-  let question = query;
-  if (!isInventoryQuestion(query)) {
-    const lastUser = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
-    if (intent !== "FOLLOW_UP" || !isInventoryQuestion(lastUser)) return null;
-    question = await rewriteFollowUpQuery(query, history);
-  }
-  const inventory = await inventoryReplyFor(question);
+/** "Phòng QA có bao nhiêu SOP", "liệt kê biểu mẫu của IT": đếm trên danh mục file thay vì đoạn trích. */
+async function inventoryReplyForRoute(route: RoutedQuery): Promise<PreparedReply | null> {
+  const fromModel = route.source === "llm";
+  const inventory = await inventoryReplyFor(route.standaloneQuery, {
+    routed: fromModel,
+    departments: fromModel ? route.departments : undefined,
+    docTypes: fromModel ? route.docTypes : undefined,
+    wantsList: route.wantsList,
+  });
   if (!inventory) return null;
 
-  fastify.log.info({ query, question, summary: JSON.parse(inventory.summaryJson) }, "inventory_query");
+  fastify.log.info({ question: route.standaloneQuery, summary: JSON.parse(inventory.summaryJson) }, "inventory_query");
   return {
     prompt: buildInventoryIntroPrompt(inventory.summaryJson),
     maxTokens: INVENTORY_INTRO_MAX_TOKENS,
     list: inventory.list,
   };
+}
+
+/** Rà quy định trùng lặp / so sánh giữa các SOP → các cặp đoạn gần nghĩa nhất để LLM phân tích. */
+async function overlapContextFor(route: RoutedQuery, catalog: CatalogMatch | null): Promise<OverlapContext | null> {
+  const query = route.standaloneQuery;
+  const fromModel = route.source === "llm";
+  const wantsOverlap = fromModel ? route.task === "overlap_check" : isOverlapQuestion(query);
+  const wantsCompare = fromModel ? route.task === "doc_compare" : isCompareQuestion(query);
+  if (!wantsOverlap && !wantsCompare) return null;
+
+  try {
+    return await findOverlapContext(
+      query,
+      catalog,
+      wantsCompare,
+      wantsOverlap,
+      fromModel ? { topic: route.topic, department: route.departments[0] ?? null } : undefined
+    );
+  } catch (err) {
+    fastify.log.warn(`Overlap analysis failed: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 /**
@@ -389,6 +384,102 @@ async function* streamPreparedAnswer(reply: PreparedReply, messages: ChatMessage
   if (reply.list) yield reply.list.markdown;
 }
 
+interface AnswerPlan {
+  intent: Intent;
+  route: RoutedQuery;
+  reply: PreparedReply;
+  // Mọi file có đoạn trích đưa vào prompt (không trùng), theo thứ tự ưu tiên
+  retrievedSources: UiSource[];
+}
+
+type Emit = (event: string, data: unknown) => void;
+
+/**
+ * Chuẩn bị câu trả lời: hiểu câu hỏi (một lần gọi model) → chọn nhánh → lấy dữ liệu → prompt.
+ * Dùng chung cho /query và /query/stream để hai endpoint luôn trả lời giống nhau.
+ */
+async function prepareAnswer(query: string, history: ChatMessage[], emit: Emit = () => {}): Promise<AnswerPlan> {
+  const route = await routeQuery(query, history);
+  const intent: Intent = route.task === "chitchat" ? "CHITCHAT" : route.followUp ? "FOLLOW_UP" : "NEW_QUESTION";
+  emit("intent", { intent });
+  fastify.log.info({ query, route }, "route_query");
+
+  const noSources = (reply: PreparedReply): AnswerPlan => {
+    emit("sources", { sources: [] });
+    return { intent, route, reply, retrievedSources: [] };
+  };
+
+  if (route.task === "chitchat") {
+    return noSources({ prompt: buildChitChatSystemPrompt(), maxTokens: 2048, list: null });
+  }
+
+  // Hồ sơ QualZen: trả lời từ database. Bước lập kế hoạch vẫn có thể thấy đây là câu hỏi về
+  // tài liệu → đi tiếp luồng SOP bên dưới.
+  if (route.task === "qualzen") {
+    const qualzen = await qualzenReplyFor(query, history, route.source === "llm");
+    if (qualzen) return noSources(qualzen);
+  }
+
+  // Kho tài liệu: đếm / liệt kê trên danh mục file
+  if (route.task === "doc_inventory") {
+    const inventory = await inventoryReplyForRoute(route);
+    if (inventory) return noSources(inventory);
+  }
+
+  // Còn lại: tìm trong tài liệu SOP
+  const searchQuery = route.standaloneQuery;
+  const complexity = classifyComplexity(searchQuery);
+  emit("complexity", { complexity });
+
+  // Tra danh mục file theo mã tài liệu: dùng cho câu hỏi đếm / liệt kê biểu mẫu của một SOP,
+  // và để ưu tiên tìm trong đúng các file của tài liệu được nhắc tới
+  const catalog = await findCatalogForQuery(`${query} ${searchQuery} ${route.docCodes.join(" ")}`);
+
+  // Rà quy định trùng lặp / so sánh giữa các SOP: ghép các đoạn gần nghĩa nhất thay cho tìm kiếm thường
+  const overlap = await overlapContextFor(route, catalog);
+  const wantsOverview = route.source === "llm" ? route.task === "doc_overview" : isOverviewQuestion(searchQuery);
+  // Tìm bằng cả các tên gọi khác trong bảng thuật ngữ ("tự thanh tra" → cả "self inspection")
+  const retrievalQuery = overlap ? searchQuery : await expandWithGlossary(searchQuery);
+  const { reranked, stats } = overlap
+    ? { reranked: overlap.chunks, stats: overlap.stats }
+    : await enhancedRetrieve(
+        retrievalQuery,
+        complexity,
+        focusPathsOf(catalog),
+        overviewPathsOf(searchQuery, catalog, wantsOverview)
+      );
+  fastify.log.info(
+    { query, searchQuery, retrievalQuery, intent, task: route.task, complexity, catalog_files: catalog?.total ?? 0, ...stats },
+    "retrieval_stats"
+  );
+
+  const retrievedSources: UiSource[] = [];
+  const seenFiles = new Set<string>();
+  for (const r of reranked) {
+    const key = `${r.fileName}::${r.sheetName || ""}`;
+    if (!seenFiles.has(key)) {
+      seenFiles.add(key);
+      retrievedSources.push({
+        fileName: r.fileName,
+        category: r.category,
+        sheetName: r.sheetName,
+        score: Math.round(r.score * 1000) / 1000,
+      });
+    }
+  }
+  // Gửi trước khi có câu trả lời (app bản cũ hiển thị danh sách này).
+  // Danh sách chính thức nằm trong event "done", sau khi biết câu trả lời dùng nguồn nào.
+  emit("sources", { sources: retrievedSources.slice(0, MAX_UI_SOURCES) });
+
+  if (overlap) {
+    return { intent, route, reply: { prompt: buildOverlapSystemPrompt(overlap), maxTokens: OVERLAP_MAX_ANSWER_TOKENS, list: null }, retrievedSources };
+  }
+  const prompt = route.followUp
+    ? buildFollowUpSystemPrompt(reranked, catalog)
+    : buildSOPSystemPrompt(reranked, complexity === "complex", catalog);
+  return { intent, route, reply: { prompt, maxTokens: 2048, list: null }, retrievedSources };
+}
+
 // JSON endpoint (debug)
 fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
   const { query, history } = request.body ?? ({} as QueryBody);
@@ -397,71 +488,27 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
     return reply.code(400).send({ error: queryError });
   }
 
+  const startedAt = Date.now();
+  const answerId = crypto.randomUUID();
   const limitedHistory = sanitizeHistory(history);
-  const intent = await classifyIntent(query, limitedHistory);
+  const plan = await prepareAnswer(query, limitedHistory);
+  const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
 
-  let sources: any[] = [];
   let answer = "";
-
-  if (intent === "CHITCHAT") {
-    const sysPrompt = buildChitChatSystemPrompt();
-    const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
-    for await (const delta of streamChatCompletion(sysPrompt, messages)) {
-      answer += delta;
-    }
-  } else {
-    const prepared =
-      (await qualzenReplyFor(query, limitedHistory)) ??
-      (await inventoryReplyForQuery(query, intent, limitedHistory));
-    let sysPrompt = "";
-    let maxTokens: number | undefined;
-
-    if (!prepared) {
-      const complexity = classifyComplexity(query);
-      const searchQuery =
-        intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
-      const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
-      const overlap = await overlapContextFor(searchQuery, catalog);
-      const reranked = overlap
-        ? overlap.chunks
-        : (
-            await enhancedRetrieve(
-              searchQuery,
-              complexity,
-              focusPathsOf(catalog),
-              overviewPathsOf(searchQuery, catalog)
-            )
-          ).reranked;
-
-      sources = reranked.map((r) => ({
-        fileName: r.fileName,
-        category: r.category,
-        sheetName: r.sheetName,
-        score: r.score,
-      }));
-
-      const useCoT = complexity === "complex";
-      if (overlap) {
-        sysPrompt = buildOverlapSystemPrompt(overlap);
-        maxTokens = OVERLAP_MAX_ANSWER_TOKENS;
-      } else {
-        sysPrompt =
-          intent === "FOLLOW_UP"
-            ? buildFollowUpSystemPrompt(reranked, catalog)
-            : buildSOPSystemPrompt(reranked, useCoT, catalog);
-      }
-    }
-
-    const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
-    const stream = prepared
-      ? streamPreparedAnswer(prepared, messages)
-      : streamChatCompletion(sysPrompt, messages, maxTokens);
-    for await (const delta of stream) {
-      answer += delta;
-    }
+  for await (const delta of streamPreparedAnswer(plan.reply, messages)) {
+    answer += delta;
   }
-
-  return { intent, answer, sources };
+  void logInteraction({
+    id: answerId,
+    query,
+    historyTurns: limitedHistory.length,
+    intent: plan.intent,
+    route: plan.route,
+    answer,
+    sources: plan.retrievedSources.map((s) => s.fileName),
+    ms: Date.now() - startedAt,
+  });
+  return { answerId, intent: plan.intent, answer, sources: plan.retrievedSources };
 });
 
 // SSE streaming endpoint
@@ -487,117 +534,72 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
     "X-Accel-Buffering": "no",
   });
 
-  const send = (event: string, data: any) => {
+  const send = (event: string, data: unknown) => {
     reply.raw.write(`event: ${event}\n`);
     reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
+  // Mã câu trả lời: app gửi kèm khi người dùng bấm 👍/👎 (POST /feedback)
+  const answerId = crypto.randomUUID();
+  const startedAt = Date.now();
+  const limitedHistory = sanitizeHistory(history);
+  let plan: AnswerPlan | null = null;
+  let answer = "";
+  let shownSources: UiSource[] = [];
+  let error: string | undefined;
+
   try {
-    const limitedHistory = sanitizeHistory(history);
-    const intent: Intent = await classifyIntent(query, limitedHistory);
-    send("intent", { intent });
+    plan = await prepareAnswer(query, limitedHistory, send);
 
-    let sysPrompt: string;
-    let maxTokens: number | undefined;
-    // Mọi file có đoạn trích đưa vào prompt (không trùng), theo thứ tự ưu tiên
-    const retrievedSources: UiSource[] = [];
-
-    // Câu hỏi về hồ sơ QualZen (Action Item, CCN, CAPA) trả lời từ database, không qua tài liệu SOP;
-    // câu hỏi về kho tài liệu (đếm / liệt kê SOP) trả lời từ danh mục file
-    const prepared =
-      intent === "CHITCHAT"
-        ? null
-        : ((await qualzenReplyFor(query, limitedHistory)) ??
-          (await inventoryReplyForQuery(query, intent, limitedHistory)));
-
-    if (intent === "CHITCHAT") {
-      sysPrompt = buildChitChatSystemPrompt();
-      send("sources", { sources: [] });
-    } else if (prepared) {
-      sysPrompt = prepared.prompt;
-      send("sources", { sources: [] });
-    } else {
-      // 1. Classify complexity
-      const complexity = classifyComplexity(query);
-      send("complexity", { complexity });
-
-      // 2. Follow-up: viết lại thành truy vấn độc lập để tìm đúng chủ đề đang nói
-      const searchQuery =
-        intent === "FOLLOW_UP" ? await rewriteFollowUpQuery(query, limitedHistory) : query;
-
-      // 3. Enhanced retrieve (HyDE + Query Expansion + Rerank)
-      // Tra danh mục file theo mã tài liệu trong câu hỏi: dùng cho câu hỏi đếm/liệt kê,
-      // và để ưu tiên tìm trong đúng các file của tài liệu được nhắc tới
-      const catalog = await findCatalogForQuery(`${query} ${searchQuery}`);
-
-      // Câu hỏi rà quy định trùng lặp / so sánh giữa các SOP: ghép các đoạn gần nghĩa nhất thay cho tìm kiếm thường
-      const overlap = await overlapContextFor(searchQuery, catalog);
-      const { reranked, stats } = overlap
-        ? { reranked: overlap.chunks, stats: overlap.stats }
-        : await enhancedRetrieve(
-            searchQuery,
-            complexity,
-            focusPathsOf(catalog),
-            overviewPathsOf(searchQuery, catalog)
-          );
-      fastify.log.info(
-        { query, searchQuery, intent, complexity, catalog_files: catalog?.total ?? 0, ...stats },
-        "retrieval_stats"
-      );
-
-      // 4. Dedupe sources theo file
-      const seenFiles = new Set<string>();
-      for (const r of reranked) {
-        const key = `${r.fileName}::${r.sheetName || ""}`;
-        if (!seenFiles.has(key)) {
-          seenFiles.add(key);
-          retrievedSources.push({
-            fileName: r.fileName,
-            category: r.category,
-            sheetName: r.sheetName,
-            score: Math.round(r.score * 1000) / 1000,
-          });
-        }
-      }
-      // Gửi trước khi có câu trả lời (app bản cũ hiển thị danh sách này).
-      // Danh sách chính thức nằm trong event "done", sau khi biết câu trả lời dùng nguồn nào.
-      send("sources", { sources: retrievedSources.slice(0, MAX_UI_SOURCES) });
-
-      // 5. Build prompt (CoT khi complex, SOP vs FOLLOW_UP vs CHITCHAT)
-      const useCoT = complexity === "complex";
-      if (overlap) {
-        sysPrompt = buildOverlapSystemPrompt(overlap);
-        maxTokens = OVERLAP_MAX_ANSWER_TOKENS;
-      } else {
-        sysPrompt =
-          intent === "FOLLOW_UP"
-            ? buildFollowUpSystemPrompt(reranked, catalog)
-            : buildSOPSystemPrompt(reranked, useCoT, catalog);
-      }
-    }
-
-    // 6. Stream LLM response
     const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
-    let answer = "";
-    const stream = prepared
-      ? streamPreparedAnswer(prepared, messages)
-      : streamChatCompletion(sysPrompt, messages, maxTokens);
-    for await (const delta of stream) {
+    for await (const delta of streamPreparedAnswer(plan.reply, messages)) {
       answer += delta;
       send("chunk", { delta });
     }
 
-    // 7. Nguồn hiển thị: chỉ các file câu trả lời thật sự dùng; không có gì nếu "không tìm thấy"
-    send("done", {
-      intent,
-      sources: selectDisplayedSources(answer, retrievedSources, MAX_UI_SOURCES),
-    });
+    // Nguồn hiển thị: chỉ các file câu trả lời thật sự dùng; không có gì nếu "không tìm thấy"
+    shownSources = selectDisplayedSources(answer, plan.retrievedSources, MAX_UI_SOURCES);
+    send("done", { answerId, intent: plan.intent, sources: shownSources });
   } catch (err) {
+    error = (err as Error).message;
     fastify.log.error(err);
-    send("error", { message: (err as Error).message });
+    send("error", { message: error });
   } finally {
     reply.raw.end();
+    void logInteraction({
+      id: answerId,
+      query,
+      historyTurns: limitedHistory.length,
+      intent: plan?.intent ?? "",
+      route: plan?.route ?? null,
+      answer,
+      sources: shownSources.map((s) => s.fileName),
+      ms: Date.now() - startedAt,
+      ...(error ? { error } : {}),
+    });
   }
+});
+
+// Phản hồi 👍/👎 cho một câu trả lời (answerId nhận từ event "done")
+interface FeedbackBody {
+  answerId?: unknown;
+  rating?: unknown;
+  comment?: unknown;
+}
+const ANSWER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_FEEDBACK_COMMENT_CHARS = 1000;
+
+fastify.post<{ Body: FeedbackBody }>("/feedback", async (request, reply) => {
+  const { answerId, rating, comment } = request.body ?? {};
+  if (typeof answerId !== "string" || !ANSWER_ID_PATTERN.test(answerId)) {
+    return reply.code(400).send({ error: "answerId không hợp lệ" });
+  }
+  if (rating !== "up" && rating !== "down") {
+    return reply.code(400).send({ error: "rating phải là up hoặc down" });
+  }
+  const note = typeof comment === "string" ? comment.trim().slice(0, MAX_FEEDBACK_COMMENT_CHARS) : "";
+  await logFeedback({ id: answerId, rating, ...(note ? { comment: note } : {}) });
+  return { ok: true };
 });
 
 // Startup

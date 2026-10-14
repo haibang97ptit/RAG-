@@ -8,11 +8,16 @@ interface Source {
   score: number;
 }
 
+type Rating = "up" | "down";
+
 interface Message {
   role: "user" | "assistant";
   content: string;
   intent?: "NEW_QUESTION" | "FOLLOW_UP" | "CHITCHAT";
   sources?: Source[];
+  answerId?: string; // backend cấp, dùng khi gửi 👍/👎
+  rating?: Rating;
+  commentSent?: boolean;
 }
 
 const BACKEND_URL =
@@ -46,6 +51,80 @@ function saveSession(messages: Message[]) {
     const data: StoredSession = { messages, savedAt: Date.now() };
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data));
   } catch {}
+}
+
+const authHeaders = (): Record<string, string> => ({
+  "Content-Type": "application/json",
+  ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+});
+
+/** Gửi 👍/👎 (kèm góp ý nếu có). Lỗi mạng thì bỏ qua: phản hồi không quan trọng bằng việc hỏi đáp. */
+async function sendFeedback(answerId: string, rating: Rating, comment?: string) {
+  try {
+    await fetch(`${BACKEND_URL}/feedback`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ answerId, rating, ...(comment ? { comment } : {}) }),
+    });
+  } catch (err) {
+    console.warn("Gửi phản hồi lỗi:", err);
+  }
+}
+
+function FeedbackBar({
+  message,
+  onRate,
+  onComment,
+}: {
+  message: Message;
+  onRate: (rating: Rating) => void;
+  onComment: (comment: string) => void;
+}) {
+  const [comment, setComment] = useState("");
+  const [skipped, setSkipped] = useState(false);
+  const askComment = message.rating === "down" && !message.commentSent && !skipped;
+
+  return (
+    <div className="feedback">
+      <div className="feedback-buttons">
+        <span className="feedback-label">Câu trả lời có đúng không?</span>
+        <button
+          className={`btn-rate${message.rating === "up" ? " active" : ""}`}
+          onClick={() => onRate("up")}
+          title="Đúng, hữu ích"
+        >
+          👍
+        </button>
+        <button
+          className={`btn-rate${message.rating === "down" ? " active" : ""}`}
+          onClick={() => onRate("down")}
+          title="Sai hoặc chưa đủ"
+        >
+          👎
+        </button>
+        {message.rating && !askComment && <span className="feedback-thanks">Cảm ơn bạn đã góp ý</span>}
+      </div>
+      {askComment && (
+        <div className="feedback-comment">
+          <textarea
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="Sai ở đâu, hoặc câu trả lời đúng là gì? (không bắt buộc)"
+            rows={2}
+            maxLength={1000}
+          />
+          <div className="feedback-actions">
+            <button className="btn-skip" onClick={() => setSkipped(true)}>
+              Bỏ qua
+            </button>
+            <button className="btn-send-comment" onClick={() => onComment(comment.trim())} disabled={!comment.trim()}>
+              Gửi góp ý
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function IntentBadge({ intent }: { intent?: Message["intent"] }) {
@@ -103,10 +182,7 @@ export default function App() {
     try {
       const response = await fetch(`${BACKEND_URL}/query/stream`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
-        },
+        headers: authHeaders(),
         body: JSON.stringify({ query: text, history }),
         signal: abortRef.current.signal,
       });
@@ -160,6 +236,7 @@ export default function App() {
                 const last = next[next.length - 1];
                 if (last && last.role === "assistant") {
                   last.sources = payload.sources || [];
+                  last.answerId = payload.answerId;
                 }
                 return next;
               });
@@ -202,6 +279,24 @@ export default function App() {
       setLoading(false);
       abortRef.current = null;
     }
+  }
+
+  function updateMessage(index: number, patch: Partial<Message>) {
+    setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, ...patch } : m)));
+  }
+
+  function rate(index: number, rating: Rating) {
+    const message = messages[index];
+    if (!message.answerId) return;
+    updateMessage(index, { rating, commentSent: false });
+    void sendFeedback(message.answerId, rating);
+  }
+
+  function comment(index: number, text: string) {
+    const message = messages[index];
+    if (!message.answerId || !message.rating) return;
+    updateMessage(index, { commentSent: true });
+    void sendFeedback(message.answerId, message.rating, text);
   }
 
   function clearChat() {
@@ -277,6 +372,13 @@ export default function App() {
                   ))}
                 </ul>
               </div>
+            )}
+            {m.role === "assistant" && m.answerId && !(loading && i === messages.length - 1) && (
+              <FeedbackBar
+                message={m}
+                onRate={(rating) => rate(i, rating)}
+                onComment={(text) => comment(i, text)}
+              />
             )}
           </div>
         ))}

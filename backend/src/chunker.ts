@@ -148,6 +148,47 @@ export function isHeadingLine(paragraph: string): boolean {
   return /^\d+(\.\d+)*[.)]?\s+\S/.test(text) && !/[.;:,]$/.test(text);
 }
 
+/** Cấp của tiêu đề: "## x" → 2, "5.3.1 x" → 3, "5 PROCEDURE" / "5. PROCEDURE" → 1. */
+function headingLevel(heading: string): number {
+  const text = heading.trim();
+  const hashes = text.match(/^(#{1,6})\s/);
+  if (hashes) return hashes[1].length;
+  const numbers = text.match(/^(\d+(?:\.\d+)*)/);
+  return numbers ? numbers[1].split(".").length : 1;
+}
+
+const cleanHeading = (heading: string) => heading.trim().replace(/^#{1,6}\s+/, "").slice(0, 80);
+
+export interface SectionedChunk {
+  text: string;
+  section: string; // mục chứa đoạn này, vd "5. PROCEDURE › 5.3 Quản lý mật khẩu" ("" nếu chưa gặp tiêu đề nào)
+}
+
+/**
+ * Như chunkText nhưng kèm tên mục của từng đoạn. Đoạn ở giữa một mục dài không chứa tiêu đề nào,
+ * nên khi tách riêng ra thì không biết nó thuộc phần nào của SOP - tên mục giúp tìm kiếm và trả lời đúng ngữ cảnh.
+ */
+export function chunkTextWithSections(text: string, options: ChunkOptions): SectionedChunk[] {
+  const chunks = chunkText(text, options);
+  const path: { level: number; title: string }[] = [];
+  const pathLabel = () => path.map((p) => p.title).join(" › ");
+
+  return chunks.map((chunk) => {
+    const paragraphs = chunk.split(/\n\n+/);
+    // Đoạn mở đầu bằng tiêu đề thì thuộc mục đó; không thì thuộc mục đang mở từ trước
+    let section = pathLabel();
+    paragraphs.forEach((para, i) => {
+      if (!isHeadingLine(para)) return;
+      const level = headingLevel(para);
+      while (path.length > 0 && path[path.length - 1].level >= level) path.pop();
+      path.push({ level, title: cleanHeading(para) });
+      if (path.length > 2) path.splice(0, path.length - 2); // giữ 2 cấp gần nhất cho gọn
+      if (i === 0) section = pathLabel();
+    });
+    return { text: chunk, section };
+  });
+}
+
 /** Tách các tiêu đề nằm ở CUỐI đoạn text (chúng thuộc về nội dung đứng sau). */
 function splitTrailingHeadings(text: string): { rest: string; headings: string[] } {
   const paragraphs = text.split(/\n\n+/).map((p) => p.trim()).filter((p) => p.length > 0);

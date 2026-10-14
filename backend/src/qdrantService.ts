@@ -1,6 +1,12 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { config } from "./config.js";
 import { getEmbeddingDimension } from "./embedding.js";
+import { toSparseVector, type SparseVector } from "./sparseVector.js";
+
+// Tên vector thưa (tìm theo từ khóa). Vector nghĩa (dense) là vector không tên ("").
+const SPARSE_NAME = "text";
+// Mỗi nhánh (nghĩa / từ khóa) lấy nhiều hơn số cần rồi trộn bằng RRF
+const HYBRID_PREFETCH_FACTOR = 2;
 
 let client: QdrantClient | null = null;
 
@@ -31,10 +37,13 @@ export async function ensureCollection(reset: boolean = false): Promise<void> {
         size: getEmbeddingDimension(),
         distance: "Cosine",
       },
-    });
+      // Tìm theo từ khóa: Qdrant tự tính IDF từ toàn bộ kho
+      sparse_vectors: { [SPARSE_NAME]: { modifier: "idf" } },
+    } as any);
 
-    console.log(`   ✓ Created collection '${collectionName}'`);
+    console.log(`   ✓ Created collection '${collectionName}' (tìm theo nghĩa + từ khóa)`);
   }
+  hybridCache = null;
 
   // Payload index để delete theo file nhanh (dùng cho incremental).
   // Chạy cả với collection đã có sẵn - tạo lại index đã tồn tại là no-op.
@@ -50,9 +59,36 @@ export async function ensureCollection(reset: boolean = false): Promise<void> {
   }
 }
 
+let hybridCache: { collection: string; enabled: boolean } | null = null;
+
+/**
+ * Collection có vector từ khóa không. Collection tạo trước khi có tính năng này thì không
+ * (cấu hình vector không thêm được vào collection có sẵn) → tìm theo nghĩa như cũ cho tới khi
+ * index sang collection mới (xem docs/DEPLOY.md).
+ */
+export async function isHybridEnabled(): Promise<boolean> {
+  if (hybridCache?.collection === config.collectionName) return hybridCache.enabled;
+  try {
+    const info: any = await getQdrantClient().getCollection(config.collectionName);
+    const enabled = !!info.config?.params?.sparse_vectors?.[SPARSE_NAME];
+    hybridCache = { collection: config.collectionName, enabled };
+    return enabled;
+  } catch {
+    return false;
+  }
+}
+
+/** Collection có vector từ khóa thì point trả về vector dạng { "": dense, text: sparse }. */
+function denseOf(vector: unknown): number[] {
+  if (Array.isArray(vector)) return vector as number[];
+  return ((vector as Record<string, unknown>)?.[""] as number[]) ?? [];
+}
+
 export interface PointToInsert {
   id: string | number;
   vector: number[];
+  // Văn bản dùng để tạo vector từ khóa (tên tài liệu + mục + nội dung)
+  keywordText?: string;
   payload: {
     text: string;
     fileName: string;
@@ -61,6 +97,7 @@ export interface PointToInsert {
     fileType: string;
     sheetName?: string;
     chunkIndex: number;
+    section?: string; // mục chứa đoạn này trong tài liệu
   };
 }
 
@@ -68,6 +105,9 @@ export async function upsertPoints(points: PointToInsert[]): Promise<void> {
   if (points.length === 0) return;
 
   const c = getQdrantClient();
+  const hybrid = await isHybridEnabled();
+  const toVector = (p: PointToInsert): any =>
+    hybrid && p.keywordText ? { "": p.vector, [SPARSE_NAME]: toSparseVector(p.keywordText) } : p.vector;
 
   // Retry 3 lần với exponential backoff
   let lastErr: Error | undefined;
@@ -77,7 +117,7 @@ export async function upsertPoints(points: PointToInsert[]): Promise<void> {
         wait: true,
         points: points.map((p) => ({
           id: p.id,
-          vector: p.vector,
+          vector: toVector(p),
           payload: p.payload as unknown as Record<string, unknown>,
         })),
       });
@@ -186,29 +226,46 @@ export interface SearchResult {
   category: string;
   fileType: string;
   sheetName?: string;
+  section?: string; // mục chứa đoạn này (chỉ có ở collection index từ bản có tên mục)
 }
 
 // onlyFilePaths: chỉ tìm trong các file này (dùng khi câu hỏi nhắc đích danh mã tài liệu)
 // excludeFilePaths: bỏ qua các file này (dùng khi tìm nội dung trùng ở các tài liệu KHÁC)
+// keywordText: có thì tìm kết hợp nghĩa + từ khóa (điểm trộn RRF, không còn là độ tương đồng cosine
+//   → các chỗ dùng điểm làm ngưỡng như rà trùng lặp không truyền tham số này)
 export async function searchSimilar(
   queryVector: number[],
   topK: number,
   onlyFilePaths?: string[],
-  excludeFilePaths?: string[]
+  excludeFilePaths?: string[],
+  keywordText?: string
 ): Promise<SearchResult[]> {
   const filter: Record<string, unknown> = {};
   if (onlyFilePaths?.length) filter.must = [{ key: "filePath", match: { any: onlyFilePaths } }];
   if (excludeFilePaths?.length) filter.must_not = [{ key: "filePath", match: { any: excludeFilePaths } }];
+  const filterPart = Object.keys(filter).length > 0 ? { filter } : {};
 
   const c = getQdrantClient();
-  const response = await c.query(config.collectionName, {
-    query: queryVector,
-    limit: topK,
-    with_payload: true,
-    ...(Object.keys(filter).length > 0 ? { filter } : {}),
-  });
+  const sparse = keywordText && (await isHybridEnabled()) ? toSparseVector(keywordText) : null;
+  const response: any =
+    sparse && sparse.indices.length > 0
+      ? await c.query(config.collectionName, {
+          prefetch: [
+            { query: queryVector, limit: topK * HYBRID_PREFETCH_FACTOR, ...filterPart },
+            { query: sparse, using: SPARSE_NAME, limit: topK * HYBRID_PREFETCH_FACTOR, ...filterPart },
+          ],
+          query: { fusion: "rrf" },
+          limit: topK,
+          with_payload: true,
+        } as any)
+      : await c.query(config.collectionName, {
+          query: queryVector,
+          limit: topK,
+          with_payload: true,
+          ...filterPart,
+        });
 
-  return response.points.map((r) => {
+  return response.points.map((r: any) => {
     const payload = r.payload as any;
     return {
       score: r.score,
@@ -218,6 +275,7 @@ export async function searchSimilar(
       category: payload.category,
       fileType: payload.fileType,
       sheetName: payload.sheetName,
+      section: payload.section,
     };
   });
 }
@@ -257,7 +315,7 @@ export async function fetchAllChunksWithVectors(maxChunks: number): Promise<Corp
         filePath: payload.filePath,
         category: payload.category || "Chung",
         chunkIndex: payload.chunkIndex ?? 0,
-        vector: Float32Array.from(point.vector as number[]),
+        vector: Float32Array.from(denseOf(point.vector)),
       });
     }
     offset = result.next_page_offset;
@@ -294,7 +352,7 @@ export async function fetchFileChunksWithVectors(
         fileType: payload.fileType,
         sheetName: payload.sheetName,
         chunkIndex: payload.chunkIndex ?? 0,
-        vector: point.vector as number[],
+        vector: denseOf(point.vector),
       });
     }
     offset = result.next_page_offset;
@@ -349,6 +407,7 @@ export async function fetchOpeningChunks(
       category: payload.category,
       fileType: payload.fileType,
       sheetName: payload.sheetName,
+      section: payload.section,
     }));
 }
 

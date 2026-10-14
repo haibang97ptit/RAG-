@@ -249,7 +249,7 @@ Ví dụ: ["biến thể 1", "biến thể 2", "biến thể 3"]`;
         { role: "system", content: systemPrompt },
         { role: "user", content: `Câu hỏi: "${query}"\n\nTrả về JSON:` },
       ],
-      temperature: 0.3,
+      temperature: 0, // cùng câu hỏi → cùng biến thể → cùng đoạn trích
       max_tokens: 300,
     });
 
@@ -281,7 +281,7 @@ KHÔNG thêm giải thích, chỉ viết đoạn văn.`;
         { role: "system", content: systemPrompt },
         { role: "user", content: query },
       ],
-      temperature: 0.1,
+      temperature: 0,
       max_tokens: 300,
     });
     return response.choices[0]?.message?.content?.trim() || "";
@@ -304,7 +304,7 @@ export async function rerankChunks(
   const chunksText = chunks
     .map((c, i) => {
       const preview = c.text.slice(0, 500).replace(/\n+/g, " ");
-      return `[${i}] File: ${c.fileName}\n${preview}...`;
+      return `[${i}] File: ${c.fileName}${c.section ? ` | Mục: ${c.section}` : ""}\n${preview}...`;
     })
     .join("\n\n---\n\n");
 
@@ -414,7 +414,8 @@ export function buildSOPSystemPrompt(
   const contextBlocks = contextChunks
     .map((c, i) => {
       const sheetInfo = c.sheetName ? ` | Sheet: ${c.sheetName}` : "";
-      return `[Nguồn ${i + 1}] File: ${c.fileName} | Phòng ban: ${c.category}${sheetInfo}\n${c.text}`;
+      const sectionInfo = c.section ? ` | Mục: ${c.section}` : "";
+      return `[Nguồn ${i + 1}] File: ${c.fileName} | Phòng ban: ${c.category}${sheetInfo}${sectionInfo}\n${c.text}`;
     })
     .join("\n\n═══════════════════════════════\n\n");
 
@@ -469,7 +470,7 @@ export function buildFollowUpSystemPrompt(
     ? `\n\nTÀI LIỆU BỔ SUNG (nếu cần):\n═══════════════════════════════\n\n${contextChunks
         .map(
           (c, i) =>
-            `[Nguồn ${i + 1}] File: ${c.fileName}${c.sheetName ? ` | Sheet: ${c.sheetName}` : ""}\n${c.text}`
+            `[Nguồn ${i + 1}] File: ${c.fileName}${c.sheetName ? ` | Sheet: ${c.sheetName}` : ""}${c.section ? ` | Mục: ${c.section}` : ""}\n${c.text}`
         )
         .join("\n\n═══════════════════════════════\n\n")}\n\n═══════════════════════════════`
     : "";
@@ -624,14 +625,21 @@ export function buildOverlapSystemPrompt(ctx: OverlapContext): string {
   return ctx.mode === "pairs" ? buildOverlapPairsPrompt(ctx) : buildOverlapTopicPrompt(ctx);
 }
 
-/** Gọi model router cho các tác vụ phân tích ngắn (trả JSON). Lỗi → chuỗi rỗng. */
-export async function callRouter(
+// Model không nhận tham số reasoning_effort (vd đổi ROUTER_MODEL sang model khác) → thôi gửi
+let reasoningEffortSupported = true;
+
+/**
+ * Gọi model router cho các tác vụ phân tích ngắn (trả JSON). Lỗi → throw.
+ * @param reasoningEffort gpt-oss là model suy luận: "low" để phân loại nhanh, ít token
+ */
+export async function callRouterStrict(
   systemPrompt: string,
   userContent: string,
-  maxTokens: number = 600
+  maxTokens: number = 600,
+  reasoningEffort?: "low" | "medium"
 ): Promise<string> {
-  try {
-    const response = await getGroq().chat.completions.create({
+  const request = (withEffort: boolean) =>
+    getGroq().chat.completions.create({
       model: config.routerModel,
       messages: [
         { role: "system", content: systemPrompt },
@@ -639,8 +647,31 @@ export async function callRouter(
       ],
       temperature: 0,
       max_tokens: maxTokens,
+      // groq-sdk 0.9 chưa khai báo kiểu cho tham số này nhưng vẫn gửi đi
+      ...(withEffort ? ({ reasoning_effort: reasoningEffort } as any) : {}),
     });
+
+  const useEffort = !!reasoningEffort && reasoningEffortSupported;
+  try {
+    const response = await request(useEffort);
     return response.choices[0]?.message?.content?.trim() || "";
+  } catch (err) {
+    if (!useEffort || (err as any)?.status !== 400) throw err;
+    reasoningEffortSupported = false;
+    console.warn("Model router không nhận reasoning_effort, gọi lại không có tham số này");
+    const response = await request(false);
+    return response.choices[0]?.message?.content?.trim() || "";
+  }
+}
+
+/** Như callRouterStrict nhưng lỗi → chuỗi rỗng. */
+export async function callRouter(
+  systemPrompt: string,
+  userContent: string,
+  maxTokens: number = 600
+): Promise<string> {
+  try {
+    return await callRouterStrict(systemPrompt, userContent, maxTokens);
   } catch (err) {
     console.warn("Router call failed:", (err as Error).message);
     return "";
@@ -738,7 +769,7 @@ export async function* streamChatCompletion(
   const stream = await getGroq().chat.completions.create({
     model: config.llmModel,
     messages: chatMessages as any,
-    temperature: 0.3,
+    temperature: 0.2, // thấp để cùng câu hỏi cho câu trả lời nhất quán
     max_tokens: maxTokens,
     stream: true,
   });
