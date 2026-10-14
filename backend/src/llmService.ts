@@ -694,6 +694,24 @@ Danh sách từng phiếu sẽ được hệ thống TỰ ĐỘNG hiển thị n
 ${VOICE_RULES}`;
 }
 
+/** Câu hỏi về kho tài liệu (đếm / liệt kê SOP theo phòng ban): LLM chỉ viết phần mở đầu từ số liệu đã đếm sẵn. */
+export function buildInventoryIntroPrompt(summaryJson: string): string {
+  return `Bạn là trợ lý AI nội bộ của công ty dược phẩm, giúp tra cứu tài liệu SOP. Người dùng hỏi về số lượng / danh sách tài liệu.
+
+SỐ LIỆU ĐÃ ĐẾM TỪ DANH MỤC TÀI LIỆU TRỢ LÝ ĐANG CÓ:
+${summaryJson}
+
+Nhiệm vụ: viết PHẦN MỞ ĐẦU ngắn gọn.
+1. Nêu rõ con số "tongSo" theo đúng "phamVi" và "loaiTaiLieu". Nếu có "theoPhongBan" hoặc "theoLoai" thì liệt kê các con số đó, mỗi nhóm một dòng ngắn. Dùng đúng các con số trong dữ liệu, không tự tính hay đoán thêm.
+2. Một câu ngắn giải thích cách đếm theo "cachDem".
+3. Lưu ý ngắn rằng đây là số tài liệu trợ lý đang có trong kho tra cứu, có thể khác danh mục chính thức của phòng ban (ví dụ file scan chưa đọc được hoặc chưa được đưa vào thư mục).
+4. Nếu "danhSachBenDuoi" là true: danh sách sẽ được hệ thống TỰ ĐỘNG hiển thị ngay bên dưới, KHÔNG tự liệt kê tên tài liệu và không viết câu "dưới đây là danh sách". Nếu false: gợi ý người dùng hỏi "liệt kê ..." để xem danh sách.
+5. Nếu "tongSo" là 0: nói không tìm thấy tài liệu nào thuộc phạm vi đó. Nếu có "phongBanCoTrongKho" thì cho biết kho hiện chỉ có tài liệu của các phòng ban đó.
+6. Tối đa khoảng 10 dòng. Trả lời bằng tiếng Việt.
+
+${VOICE_RULES}`;
+}
+
 export function buildChitChatSystemPrompt(): string {
   return `Bạn là trợ lý AI nội bộ của công ty, giúp nhân viên tra cứu tài liệu SOP.
 
