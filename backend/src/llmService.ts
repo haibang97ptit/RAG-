@@ -787,6 +787,30 @@ Nhiệm vụ: viết PHẦN MỞ ĐẦU ngắn gọn.
 ${VOICE_RULES}`;
 }
 
+/**
+ * So sánh hai phiên bản tài liệu: code đã tìm đủ các thay đổi, danh sách chi tiết do server in ngay
+ * sau câu trả lời. LLM chỉ viết phần tóm tắt từ số liệu và các thay đổi lớn nhất.
+ */
+export function buildDiffIntroPrompt(summaryJson: string): string {
+  return `Bạn là trợ lý rà soát tài liệu SOP của công ty dược. Người dùng muốn biết hai tài liệu (thường là hai phiên bản của cùng một tài liệu) KHÁC NHAU ở đâu.
+
+Máy đã so sánh TOÀN VĂN hai tài liệu (A = bản thứ nhất, B = bản thứ hai) và tìm ra các thay đổi:
+
+${summaryJson}
+
+Danh sách ĐẦY ĐỦ từng thay đổi sẽ được hệ thống TỰ ĐỘNG hiển thị ngay bên dưới câu trả lời của bạn. Nhiệm vụ của bạn là viết PHẦN TÓM TẮT:
+1. Câu đầu: tổng số thay đổi và số thêm / bỏ / sửa / chuyển vị trí (lấy đúng số trong "tongSoThayDoi" và "theoLoai").
+2. Nêu ngắn gọn các mục thay đổi nhiều nhất ("mucCoNhieuThayDoiNhat").
+3. Tóm tắt 3-8 thay đổi QUAN TRỌNG VỀ NỘI DUNG từ "cacThayDoiLonNhat": nói rõ bản B khác bản A thế nào (thêm yêu cầu gì, bỏ điều kiện gì, đổi con số gì), mỗi ý một gạch đầu dòng, ghi mục. Bỏ qua thay đổi chỉ về trình bày, lỗi chính tả, số trang.
+4. Nếu "tongSoThayDoi" là 0: nói hai tài liệu có nội dung giống nhau, không tìm thấy khác biệt.
+   Nếu "tyLeDoanGiongNhau" dưới 30%: nói rõ ngay câu đầu rằng hai tài liệu khác nhau phần lớn, có thể không phải hai phiên bản của cùng một tài liệu, nên danh sách thay đổi rất dài; vẫn nêu vài khác biệt chính.
+5. KHÔNG liệt kê lại toàn bộ danh sách, KHÔNG bịa thay đổi không có trong dữ liệu, không viết câu "dưới đây là danh sách".
+6. Dữ liệu lấy từ file PDF có thể có khác biệt giả do cách trình bày (bảng bị tách dòng, chữ đóng dấu chèn trang). Nếu thấy thay đổi chỉ là chữ vô nghĩa thì bỏ qua, không tóm tắt.
+7. Trả lời bằng tiếng Việt, tối đa khoảng 20 dòng.
+
+${VOICE_RULES}`;
+}
+
 export function buildChitChatSystemPrompt(): string {
   return `Bạn là trợ lý AI nội bộ của công ty, giúp nhân viên tra cứu tài liệu SOP.
 

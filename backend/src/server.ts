@@ -24,6 +24,7 @@ import {
   buildQualzenSystemPrompt,
   buildQualzenListIntroPrompt,
   buildInventoryIntroPrompt,
+  buildDiffIntroPrompt,
   buildOverlapSystemPrompt,
   isOverlapQuestion,
   isCompareQuestion,
@@ -36,6 +37,7 @@ import { answerDataForQualzen, QUALZEN_LIST_HEADING } from "./qualzenAssistant.j
 import { findOverlapContext, type OverlapContext } from "./overlapFinder.js";
 import { INVENTORY_LIST_HEADING, inventoryReplyFor } from "./docInventory.js";
 import { routeQuery, type RoutedQuery } from "./queryRouter.js";
+import { DIFF_LIST_HEADING, diffDocuments, diffSummaryForAi, renderDiffList } from "./docDiff.js";
 import { expandWithGlossary } from "./glossary.js";
 import { logFeedback, logInteraction } from "./interactionLog.js";
 import {
@@ -125,7 +127,7 @@ function sanitizeHistory(history: unknown): ChatMessage[] {
     // Danh sách do server in (phiếu QualZen, tài liệu trong kho) có thể rất dài: bỏ khỏi lịch sử
     // để câu hỏi sau không vượt hạn mức token
     if (m.role === "assistant") {
-      const starts = [QUALZEN_LIST_HEADING, INVENTORY_LIST_HEADING].map((h) => content.indexOf(h)).filter((i) => i >= 0);
+      const starts = [QUALZEN_LIST_HEADING, INVENTORY_LIST_HEADING, DIFF_LIST_HEADING].map((h) => content.indexOf(h)).filter((i) => i >= 0);
       if (starts.length > 0) content = `${content.slice(0, Math.min(...starts))}(Kèm danh sách chi tiết, đã lược bỏ ở đây.)`;
     }
     clean.push({ role: m.role, content: content.slice(0, MAX_HISTORY_CONTENT_CHARS) });
@@ -344,6 +346,54 @@ async function inventoryReplyForRoute(route: RoutedQuery): Promise<PreparedReply
 }
 
 /** Rà quy định trùng lặp / so sánh giữa các SOP → các cặp đoạn gần nghĩa nhất để LLM phân tích. */
+const DIFF_INTRO_MAX_TOKENS = 1500;
+
+/**
+ * "So sánh A và B", "A khác B ở đâu": tìm đủ các thay đổi giữa hai tài liệu (docDiff.ts).
+ * Cần hai mã tài liệu khớp file trong kho. Không đọc được file gốc → null (dùng cách ghép đoạn cũ).
+ */
+async function diffReplyFor(
+  route: RoutedQuery,
+  catalog: CatalogMatch | null
+): Promise<{ reply: PreparedReply; sources: UiSource[] } | null> {
+  const wantsCompare =
+    route.source === "llm"
+      ? route.task === "doc_compare"
+      : isCompareQuestion(route.standaloneQuery) && !isOverlapQuestion(route.standaloneQuery);
+  if (!wantsCompare || !catalog || catalog.total > catalog.files.length || catalog.groups.length < 2) return null;
+
+  // Mỗi mã tài liệu một file: ưu tiên SOP chính (không phải biểu mẫu / phụ lục)
+  const pick = (group: CatalogMatch["groups"][number]) => group.find((f) => isMainDocument(f.fileName)) ?? group[0];
+  const [fileA, fileB] = [pick(catalog.groups[0]), pick(catalog.groups[1])];
+  if (!fileA || !fileB || fileA.filePath === fileB.filePath) return null;
+
+  try {
+    const result = await diffDocuments(fileA.filePath, fileB.filePath);
+    fastify.log.info(
+      { fileA: fileA.fileName, fileB: fileB.fileName, paragraphs: [result.paragraphsA, result.paragraphsB], counts: result.counts },
+      "document_diff"
+    );
+    const summary = diffSummaryForAi(result, config.overlapPromptBudgetChars);
+    return {
+      reply: {
+        prompt: buildDiffIntroPrompt(summary),
+        maxTokens: DIFF_INTRO_MAX_TOKENS,
+        list: {
+          markdown: renderDiffList(result),
+          fallbackIntro:
+            result.changes.length > 0
+              ? `So sánh **${fileA.fileName}** (A) và **${fileB.fileName}** (B): tìm thấy **${result.changes.length}** thay đổi.`
+              : `**${fileA.fileName}** và **${fileB.fileName}** có nội dung giống nhau, không tìm thấy khác biệt.`,
+        },
+      },
+      sources: [fileA, fileB].map((f) => ({ fileName: f.fileName, category: f.category, score: 1 })),
+    };
+  } catch (err) {
+    fastify.log.warn(`Document diff failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 async function overlapContextFor(route: RoutedQuery, catalog: CatalogMatch | null): Promise<OverlapContext | null> {
   const query = route.standaloneQuery;
   const fromModel = route.source === "llm";
@@ -434,6 +484,13 @@ async function prepareAnswer(query: string, history: ChatMessage[], emit: Emit =
   // Tra danh mục file theo mã tài liệu: dùng cho câu hỏi đếm / liệt kê biểu mẫu của một SOP,
   // và để ưu tiên tìm trong đúng các file của tài liệu được nhắc tới
   const catalog = await findCatalogForQuery(`${query} ${searchQuery} ${route.docCodes.join(" ")}`);
+
+  // So sánh hai tài liệu (khác nhau ở đâu): đối chiếu toàn văn hai file gốc
+  const diff = await diffReplyFor(route, catalog);
+  if (diff) {
+    emit("sources", { sources: diff.sources });
+    return { intent, route, reply: diff.reply, retrievedSources: diff.sources };
+  }
 
   // Rà quy định trùng lặp / so sánh giữa các SOP: ghép các đoạn gần nghĩa nhất thay cho tìm kiếm thường
   const overlap = await overlapContextFor(route, catalog);
