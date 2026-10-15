@@ -524,13 +524,32 @@ const OVERLAP_REPORT_FORMAT = `Với MỖI quy định trùng lặp, trình bày
 - Đề xuất: nên giữ quy định đầy đủ ở tài liệu nào (tài liệu có chủ đề chính gần với quy định đó nhất) và lý do; tài liệu còn lại nên bỏ phần chi tiết, thay bằng một câu tham chiếu. Viết luôn câu tham chiếu gợi ý. Nếu hai bên đang mâu thuẫn, nêu rõ cần thống nhất giá trị nào trước khi gom.`;
 
 /** Prompt rà quy định trùng lặp từ các CẶP ĐOẠN gần nghĩa nhất giữa tài liệu A và B. */
+// ---- Giới hạn độ dài nội dung tài liệu trong prompt so sánh / rà trùng lặp ----
+// Prompt vượt giới hạn token/phút của Groq thì bị từ chối hẳn (lỗi 413), nên cắt trước khi gửi.
+// Ưu tiên: giữ các cặp / đoạn đứng đầu (giống nhau nhất), cắt ngắn từng đoạn trước, chỉ bỏ bớt
+// khi từng đoạn đã quá ngắn để còn đọc được.
+const MIN_EXCERPT_CHARS = 450;
+const MIN_SCAN_EXAMPLE_CHARS = 250;
+
+const clipText = (text: string, max: number) => (text.length > max ? `${text.slice(0, max).trimEnd()}…` : text);
+
+/** Số mục giữ lại và độ dài tối đa mỗi đoạn, sao cho count * perItem đoạn vừa ngân sách. */
+function fitCount(count: number, excerptsPerItem: number, minChars: number): { keep: number; maxChars: number } {
+  const budget = config.overlapPromptBudgetChars;
+  let keep = count;
+  while (keep > 1 && budget / (keep * excerptsPerItem) < minChars) keep--;
+  return { keep, maxChars: Math.max(minChars, Math.floor(budget / Math.max(1, keep * excerptsPerItem))) };
+}
+
 function buildOverlapPairsPrompt(ctx: OverlapContext): string {
+  const fit = fitCount(ctx.pairs.length, 2, MIN_EXCERPT_CHARS);
+  const pairs = ctx.pairs.slice(0, fit.keep);
   const block = (tag: string, c: OverlapContext["pairs"][number]["a"]) =>
-    `[${tag}] File: ${c.fileName} | Phòng ban: ${c.category}\n${c.text}`;
+    `[${tag}] File: ${c.fileName} | Phòng ban: ${c.category}\n${clipText(c.text, fit.maxChars)}`;
 
   const pairsText =
-    ctx.pairs.length > 0
-      ? ctx.pairs
+    pairs.length > 0
+      ? pairs
           .map((p, i) => `--- CẶP ${i + 1} ---\n${block("A", p.a)}\n\n${block("B", p.b)}`)
           .join("\n\n")
       : "(Không có cặp đoạn nào đủ gần nhau về nội dung.)";
@@ -560,10 +579,21 @@ ${FORMAT_RULES}`;
 
 /** Prompt rà một CHỦ ĐỀ đang được quy định ở những tài liệu nào. */
 function buildOverlapTopicPrompt(ctx: OverlapContext): string {
+  // Lấy lần lượt đoạn thứ 1 của mọi tài liệu, rồi đoạn thứ 2…, để tài liệu nào cũng còn mặt khi phải bỏ bớt
+  const order: { group: number; chunk: number }[] = [];
+  const maxChunks = Math.max(0, ...ctx.topicGroups.map((g) => g.chunks.length));
+  for (let k = 0; k < maxChunks; k++) {
+    ctx.topicGroups.forEach((g, i) => { if (k < g.chunks.length) order.push({ group: i, chunk: k }); });
+  }
+  const fit = fitCount(order.length, 1, MIN_EXCERPT_CHARS);
+  const kept = new Set(order.slice(0, fit.keep).map((o) => `${o.group}:${o.chunk}`));
+
   const groupsText = ctx.topicGroups
+    .map((g, i) => ({ g, i, chunks: g.chunks.filter((_, k) => kept.has(`${i}:${k}`)) }))
+    .filter(({ chunks }) => chunks.length > 0)
     .map(
-      (g, i) =>
-        `=== TÀI LIỆU ${i + 1}: ${g.fileName} | Phòng ban: ${g.category} ===\n${g.chunks.map((c) => c.text).join("\n\n[...]\n\n")}`
+      ({ g, i, chunks }) =>
+        `=== TÀI LIỆU ${i + 1}: ${g.fileName} | Phòng ban: ${g.category} ===\n${chunks.map((c) => clipText(c.text, fit.maxChars)).join("\n\n[...]\n\n")}`
     )
     .join("\n\n");
 
@@ -589,13 +619,20 @@ ${FORMAT_RULES}`;
 
 /** Prompt cho kết quả QUÉT CẢ KHO: danh sách cặp tài liệu nghi trùng, để người dùng chọn cặp xem chi tiết. */
 function buildOverlapScanPrompt(ctx: OverlapContext): string {
-  const pairs = ctx.scanPairs ?? [];
+  // Danh sách cặp tài liệu là phần chính: giữ đủ các cặp, chỉ bớt số ví dụ và độ dài ví dụ
+  const allPairs = ctx.scanPairs ?? [];
+  const examplesPerPair = Math.max(1, ...allPairs.map((p) => p.examples.length));
+  let perPair = examplesPerPair;
+  while (perPair > 1 && config.overlapPromptBudgetChars / (allPairs.length * perPair * 2) < MIN_SCAN_EXAMPLE_CHARS) perPair--;
+  const fit = fitCount(allPairs.length, perPair * 2, MIN_SCAN_EXAMPLE_CHARS);
+  const pairs = allPairs.slice(0, fit.keep);
   const pairsText =
     pairs.length > 0
       ? pairs
           .map((p, i) => {
             const examples = p.examples
-              .map((e, k) => `  Ví dụ ${k + 1}:\n  - Trong A: ${e.a}\n  - Trong B: ${e.b}`)
+              .slice(0, perPair)
+              .map((e, k) => `  Ví dụ ${k + 1}:\n  - Trong A: ${clipText(e.a, fit.maxChars)}\n  - Trong B: ${clipText(e.b, fit.maxChars)}`)
               .join("\n");
             return `--- CẶP TÀI LIỆU ${i + 1} ---\nA: ${p.fileA} (Phòng ban: ${p.categoryA})\nB: ${p.fileB} (Phòng ban: ${p.categoryB})\nSố đoạn rất giống nhau: ${p.similarChunks}\n${examples}`;
           })

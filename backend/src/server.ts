@@ -480,6 +480,35 @@ async function prepareAnswer(query: string, history: ChatMessage[], emit: Emit =
   return { intent, route, reply: { prompt, maxTokens: 2048, list: null }, retrievedSources };
 }
 
+/**
+ * Lỗi hiển thị cho người dùng: câu tiếng Việt dễ hiểu thay cho nguyên văn lỗi của Groq
+ * (JSON tiếng Anh, lộ mã tổ chức). Lỗi gốc vẫn được ghi vào log.
+ */
+function userFacingError(err: unknown): string {
+  const status = (err as { status?: number })?.status;
+  const message = (err as Error)?.message ?? "";
+  const waitText = (() => {
+    const m = message.match(/try again in ((?:\d+h)?(?:\d+m)?[\d.]+s)/i);
+    if (!m) return null;
+    const hours = Number(m[1].match(/(\d+)h/)?.[1] ?? 0);
+    const minutes = Number(m[1].match(/(\d+)m/)?.[1] ?? 0);
+    const total = hours * 60 + minutes + 1; // làm tròn lên
+    return total >= 60 ? `${Math.floor(total / 60)} giờ ${total % 60} phút` : `${total} phút`;
+  })();
+
+  // Một yêu cầu đã vượt giới hạn token/phút: hỏi lại y hệt cũng sẽ lỗi
+  if (status === 413 || /request too large/i.test(message)) {
+    return "Câu hỏi này cần đọc quá nhiều nội dung so với giới hạn hiện tại của hệ thống AI. Bạn hãy hỏi hẹp hơn (ví dụ một mục, một nội dung cụ thể) rồi thử lại.";
+  }
+  if (status === 429 || /rate.?limit/i.test(message)) {
+    if (/per day|TPD|RPD/i.test(message)) {
+      return `Hệ thống AI đã dùng hết lượt trong ngày. Vui lòng thử lại sau${waitText ? ` khoảng ${waitText}` : " ít phút"}.`;
+    }
+    return "Hệ thống AI đang nhận nhiều câu hỏi cùng lúc. Vui lòng thử lại sau khoảng 1 phút.";
+  }
+  return "Đã có lỗi khi tạo câu trả lời. Vui lòng thử lại; nếu vẫn lỗi, hãy báo quản trị viên.";
+}
+
 // JSON endpoint (debug)
 fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
   const { query, history } = request.body ?? ({} as QueryBody);
@@ -563,7 +592,7 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
   } catch (err) {
     error = (err as Error).message;
     fastify.log.error(err);
-    send("error", { message: error });
+    send("error", { message: userFacingError(err) });
   } finally {
     reply.raw.end();
     void logInteraction({

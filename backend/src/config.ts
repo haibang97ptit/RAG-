@@ -70,6 +70,9 @@ export const config = {
   // 8.000 token/phút của Groq gói miễn phí; danh sách dài hơn thì server tự in, LLM chỉ viết phần tóm tắt.
   // Nâng gói Groq thì có thể tăng (vd 40000) để LLM tự trình bày nhiều phiếu hơn.
   qualzenPromptBudgetChars: parseInt(process.env.QUALZEN_PROMPT_BUDGET_CHARS || "12000", 10),
+  // Nội dung tài liệu tối đa đưa vào prompt so sánh / rà trùng lặp (ký tự). Tiếng Việt nhiều bảng chỉ
+  // ~2,1 ký tự / token: 8000 ký tự + phần hướng dẫn ≈ 5.500 token, vừa giới hạn 8.000 token/phút gói miễn phí.
+  overlapPromptBudgetChars: parseInt(process.env.OVERLAP_PROMPT_BUDGET_CHARS || "8000", 10),
   // Khi user gọi tắt mã tài liệu ("SOP 0005") mà nhiều phòng ban có mã trùng số,
   // ưu tiên phòng ban này (= tên thư mục cấp 1 trong DATA_DIR). Trống = giữ tất cả.
   defaultCategory: process.env.DEFAULT_CATEGORY || "",
