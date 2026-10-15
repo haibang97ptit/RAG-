@@ -98,6 +98,7 @@ export interface PointToInsert {
     sheetName?: string;
     chunkIndex: number;
     section?: string; // mục chứa đoạn này trong tài liệu
+    ocr?: boolean; // nội dung có phần lấy từ bản scan (nhận dạng chữ tự động)
   };
 }
 
@@ -227,6 +228,7 @@ export interface SearchResult {
   fileType: string;
   sheetName?: string;
   section?: string; // mục chứa đoạn này (chỉ có ở collection index từ bản có tên mục)
+  ocr?: boolean; // tài liệu là bản scan, chữ nhận dạng tự động (có thể sai chính tả)
 }
 
 // onlyFilePaths: chỉ tìm trong các file này (dùng khi câu hỏi nhắc đích danh mã tài liệu)
@@ -276,6 +278,7 @@ export async function searchSimilar(
       fileType: payload.fileType,
       sheetName: payload.sheetName,
       section: payload.section,
+      ocr: payload.ocr === true,
     };
   });
 }
@@ -408,6 +411,7 @@ export async function fetchOpeningChunks(
       fileType: payload.fileType,
       sheetName: payload.sheetName,
       section: payload.section,
+      ocr: payload.ocr === true,
     }));
 }
 

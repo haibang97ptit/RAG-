@@ -56,6 +56,13 @@ export const config = {
   manifestPath: path.join(manifestDir, `.ingest-manifest.${collectionName}.json`),
   // Nhật ký câu hỏi + phản hồi 👍/👎 (trên server là volume /app/state, giữ qua các lần deploy)
   stateDir: process.env.STATE_DIR || manifestDir,
+  // Nhận dạng chữ cho PDF scan (cần tesseract + poppler-utils, có sẵn trong image Docker)
+  ocrEnabled: process.env.OCR_ENABLED !== "false",
+  // Trang có ít ký tự hơn mức này thì OCR; hoặc ít hơn OCR_IMAGE_TEXT_CHARS mà trang có ảnh lớn
+  ocrMinTextChars: parseInt(process.env.OCR_MIN_TEXT_CHARS || "200", 10),
+  ocrImageTextChars: parseInt(process.env.OCR_IMAGE_TEXT_CHARS || "1500", 10),
+  ocrLang: process.env.OCR_LANG || "vie+eng",
+  ocrDpi: parseInt(process.env.OCR_DPI || "300", 10),
   enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
   // Tra cứu hồ sơ QualZen (Action Item, CCN, CAPA) - bật khi có đủ QUALZEN_DB_*
   qualzenEnabled: qualzenSettingsFromEnv() !== null,

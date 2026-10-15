@@ -4,6 +4,7 @@ import { initEmbedder } from "./embedding.js";
 import { ensureCollection, upsertPoints, countPoints } from "./qdrantService.js";
 import { readFile, walkDirectory } from "./fileReaders.js";
 import { buildPointsForDocument } from "./chunkPoints.js";
+import { reportOcr } from "./pdfReader.js";
 
 const BATCH_SIZE = 32;
 
@@ -79,6 +80,7 @@ async function ingest() {
   console.log(`   Files processed: ${totalDocs}/${files.length}`);
   console.log(`   New chunks:      ${totalChunks}`);
   console.log(`   Total in DB:     ${finalCount}`);
+  await reportOcr();
 }
 
 ingest().catch((err) => {

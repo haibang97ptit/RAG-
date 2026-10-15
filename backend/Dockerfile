@@ -13,9 +13,14 @@ COPY src ./src
 # Runtime stage
 FROM node:22-slim AS runtime
 
+# tesseract-ocr + poppler-utils: nhận dạng chữ cho PDF scan (xem src/pdfReader.ts)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libvips \
     curl \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-vie \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

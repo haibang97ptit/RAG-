@@ -57,6 +57,7 @@ export async function buildPointsForDocument(doc: ParsedDocument, firstChunkInde
           category: doc.metadata.category,
           fileType: doc.metadata.fileType,
           sheetName: doc.metadata.sheetName,
+          ...(doc.metadata.ocr ? { ocr: true } : {}),
           chunkIndex,
           ...(chunk.section ? { section: chunk.section } : {}),
         },

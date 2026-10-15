@@ -13,6 +13,7 @@ import {
 } from "./qdrantService.js";
 import { readFile, walkDirectory } from "./fileReaders.js";
 import { buildPointsForDocument } from "./chunkPoints.js";
+import { reportOcr } from "./pdfReader.js";
 
 const BATCH_SIZE = 32;
 const MANIFEST_PATH = config.manifestPath;
@@ -240,6 +241,7 @@ async function incrementalIngest() {
   if (failed > 0) {
     console.log(`   ⚠️  Lỗi:            ${failed} files (sẽ thử lại ở lần chạy sau)`);
   }
+  await reportOcr();
 }
 
 incrementalIngest().catch((err) => {

@@ -1,9 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
-import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import * as cheerio from "cheerio";
+import { readPdf } from "./pdfReader.js";
 
 export interface ParsedDocument {
   text: string;
@@ -13,14 +13,10 @@ export interface ParsedDocument {
     category: string;
     fileType: string;
     sheetName?: string;
+    ocr?: boolean; // có trang lấy chữ bằng nhận dạng từ ảnh (PDF scan)
   };
 }
 
-async function readPDF(filePath: string): Promise<string> {
-  const buffer = await fs.readFile(filePath);
-  const data = await pdfParse(buffer);
-  return data.text;
-}
 
 function htmlTableToMarkdown($: cheerio.CheerioAPI, tableEl: any): string {
   const rows: string[][] = [];
@@ -181,10 +177,15 @@ export async function readFile(
   const contextHeader = `[Tài liệu: ${fileName} | Phòng ban: ${category}]\n\n`;
 
   let text: string;
+  let ocr = false;
   switch (ext) {
-    case ".pdf":
-      text = await readPDF(filePath);
+    case ".pdf": {
+      // Trang scan được nhận dạng chữ (OCR) nếu máy có tesseract; xem pdfReader.ts
+      const pdf = await readPdf(filePath);
+      text = pdf.text;
+      ocr = pdf.ocrPages > 0;
       break;
+    }
     case ".docx":
       text = await readDOCX(filePath);
       break;
@@ -212,7 +213,7 @@ export async function readFile(
     return [];
   }
 
-  return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType } }];
+  return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType, ...(ocr ? { ocr } : {}) } }];
 }
 
 export async function walkDirectory(dir: string): Promise<string[]> {

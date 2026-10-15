@@ -232,6 +232,27 @@ $DC exec -e COLLECTION_NAME=sop_documents_v3 backend npm run ingest:incremental
 
 Log khởi động backend sẽ ghi "Created collection ... (tìm theo nghĩa + từ khóa)" khi tạo collection mới.
 
+## OCR cho PDF scan
+
+Image backend có sẵn Tesseract (tiếng Việt + tiếng Anh) và poppler. Khi nạp tài liệu, trang PDF có
+dưới 200 ký tự chữ thật (hoặc dưới 1.500 mà có ảnh lớn phủ trang) được nhận dạng chữ; bản nào nhiều
+chữ hơn (OCR hay chữ gốc) thì được giữ. Các PDF scan đã bị bỏ qua trước đây chỉ được đọc khi nạp lại:
+
+```bash
+$DC exec backend npm run ingest:incremental -- --reindex
+```
+
+OCR chậm (vài giây mỗi trang) nhưng chỉ chạy một lần cho mỗi file: kết quả lưu trong
+`/app/state/ocr-cache`, file không đổi thì lần nạp sau dùng lại. Xem kết quả:
+
+```bash
+$DC exec backend cat /app/state/ocr-report.md               # file đã OCR, độ tin cậy, file cần kiểm tra tay
+$DC exec backend ls -R /app/state/ocr-text                   # bản chữ bot đọc được từ từng PDF scan
+```
+
+File có trang độ tin cậy dưới 85% nên được kiểm tra tay hoặc thay bằng bản Word gốc. Ngưỡng chỉnh bằng
+`OCR_MIN_TEXT_CHARS`, `OCR_IMAGE_TEXT_CHARS`; tắt OCR bằng `OCR_ENABLED=false` (xem `backend/.env.example`).
+
 ## Học từ câu hỏi thật
 
 **Phản hồi người dùng.** Mỗi câu hỏi (kèm cách bot hiểu, câu trả lời) và mỗi lần bấm 👍/👎 được

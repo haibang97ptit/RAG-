@@ -365,6 +365,10 @@ Ví dụ output: [3, 7, 1, 12, 5]`;
 
 // ============== PROMPT BUILDERS ==============
 
+// Nhãn cho đoạn trích lấy từ bản scan (chữ nhận dạng tự động, xem pdfReader.ts)
+const OCR_SOURCE_NAME = "bản scan - chữ nhận dạng tự động";
+const OCR_SOURCE_LABEL = ` | ${OCR_SOURCE_NAME}`;
+
 // Câu trả lời hiển thị trong cửa sổ chat hẹp (~400px), render markdown.
 const FORMAT_RULES = `CÁCH TRÌNH BÀY (câu trả lời hiển thị trong cửa sổ chat HẸP):
 - Mở đầu bằng 1-2 câu trả lời thẳng vào câu hỏi, rồi mới tới chi tiết
@@ -415,7 +419,8 @@ export function buildSOPSystemPrompt(
     .map((c, i) => {
       const sheetInfo = c.sheetName ? ` | Sheet: ${c.sheetName}` : "";
       const sectionInfo = c.section ? ` | Mục: ${c.section}` : "";
-      return `[Nguồn ${i + 1}] File: ${c.fileName} | Phòng ban: ${c.category}${sheetInfo}${sectionInfo}\n${c.text}`;
+      const ocrInfo = c.ocr ? OCR_SOURCE_LABEL : "";
+      return `[Nguồn ${i + 1}] File: ${c.fileName} | Phòng ban: ${c.category}${sheetInfo}${sectionInfo}${ocrInfo}\n${c.text}`;
     })
     .join("\n\n═══════════════════════════════\n\n");
 
@@ -445,6 +450,7 @@ QUY TẮC NGHIÊM NGẶT:
 6. Trả lời bằng tiếng Việt, có cấu trúc
 7. Khi liệt kê (thiết bị, bước, nhân sự...), trình bày đầy đủ không bỏ sót
 8. Giữ nguyên mã số, tên viết tắt, tên thiết bị như trong tài liệu
+9. Nguồn có ghi "${OCR_SOURCE_NAME}": chữ được nhận dạng tự động từ bản scan nên có thể sai chính tả, sai số. Khi câu trả lời dựa vào nguồn này (nhất là con số, mã số), nói ngắn gọn rằng thông tin lấy từ bản scan và nên đối chiếu bản gốc
 
 ${VOICE_RULES}
 
@@ -470,7 +476,7 @@ export function buildFollowUpSystemPrompt(
     ? `\n\nTÀI LIỆU BỔ SUNG (nếu cần):\n═══════════════════════════════\n\n${contextChunks
         .map(
           (c, i) =>
-            `[Nguồn ${i + 1}] File: ${c.fileName}${c.sheetName ? ` | Sheet: ${c.sheetName}` : ""}${c.section ? ` | Mục: ${c.section}` : ""}\n${c.text}`
+            `[Nguồn ${i + 1}] File: ${c.fileName}${c.sheetName ? ` | Sheet: ${c.sheetName}` : ""}${c.section ? ` | Mục: ${c.section}` : ""}${c.ocr ? OCR_SOURCE_LABEL : ""}\n${c.text}`
         )
         .join("\n\n═══════════════════════════════\n\n")}\n\n═══════════════════════════════`
     : "";
@@ -494,6 +500,7 @@ QUY TẮC:
 3. KHÔNG trả lời "không tìm thấy" nếu chủ đề đã có trong câu trước
 4. Trích nguồn bằng TÊN FILE hoặc MÃ tài liệu (KHÔNG ghi "Nguồn 1", "Nguồn 5" - user không nhìn thấy số thứ tự nguồn), không bịa, không mix data giữa file
 5. Trả lời bằng tiếng Việt
+6. Nguồn có ghi "${OCR_SOURCE_NAME}" có thể sai chính tả, sai số: khi dựa vào nguồn này thì nói rõ thông tin lấy từ bản scan
 
 ${VOICE_RULES}
 
