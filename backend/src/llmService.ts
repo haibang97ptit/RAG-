@@ -800,7 +800,7 @@ ${summaryJson}
 
 Danh sách ĐẦY ĐỦ từng thay đổi sẽ được hệ thống TỰ ĐỘNG hiển thị ngay bên dưới câu trả lời của bạn. Nhiệm vụ của bạn là viết PHẦN TÓM TẮT:
 1. Câu đầu: tổng số thay đổi và số thêm / bỏ / sửa / chuyển vị trí (lấy đúng số trong "tongSoThayDoi" và "theoLoai").
-2. Nêu ngắn gọn các mục thay đổi nhiều nhất ("mucCoNhieuThayDoiNhat").
+2. Nêu ngắn gọn: các mục MỚI chỉ có ở bản B ("mucMoiChiCoOBanB"), các mục BỊ BỎ chỉ có ở bản A ("mucBiBoChiCoOBanA"), và các mục thay đổi nhiều nhất ("mucCoNhieuThayDoiNhat"). Danh sách mục dài thì chỉ nêu vài mục tiêu biểu kèm tổng số.
 3. Tóm tắt 3-8 thay đổi QUAN TRỌNG VỀ NỘI DUNG từ "cacThayDoiLonNhat": nói rõ bản B khác bản A thế nào (thêm yêu cầu gì, bỏ điều kiện gì, đổi con số gì), mỗi ý một gạch đầu dòng, ghi mục. Bỏ qua thay đổi chỉ về trình bày, lỗi chính tả, số trang.
 4. Nếu "tongSoThayDoi" là 0: nói hai tài liệu có nội dung giống nhau, không tìm thấy khác biệt.
    Nếu "tyLeDoanGiongNhau" dưới 30%: nói rõ ngay câu đầu rằng hai tài liệu khác nhau phần lớn, có thể không phải hai phiên bản của cùng một tài liệu, nên danh sách thay đổi rất dài; vẫn nêu vài khác biệt chính.

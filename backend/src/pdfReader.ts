@@ -6,6 +6,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import pdfParse from "pdf-parse";
 import { config } from "./config.js";
+import { repairMisencodedPage } from "./textRepair.js";
 
 /**
  * Đọc PDF, nhận dạng chữ (OCR) cho các trang scan.
@@ -80,7 +81,10 @@ export function ocrAvailable(): Promise<boolean> {
   return toolsChecked;
 }
 
-/** Lớp chữ của từng trang, cùng cách ghép dòng với pdf-parse trước đây (để PDF thường không đổi nội dung). */
+/**
+ * Lớp chữ của từng trang, cùng cách ghép dòng với pdf-parse trước đây (để PDF thường không đổi nội dung).
+ * Trang có chữ tiếng Việt bị lỗi bảng mã font được sửa lại (xem textRepair.ts).
+ */
 async function textLayerPages(buffer: Buffer): Promise<string[]> {
   const pages: string[] = [];
   await pdfParse(buffer, {
@@ -93,8 +97,9 @@ async function textLayerPages(buffer: Buffer): Promise<string[]> {
         else text += "\n" + item.str;
         lastY = item.transform[5];
       }
-      pages.push(text);
-      return text;
+      const repaired = repairMisencodedPage(text);
+      pages.push(repaired);
+      return repaired;
     },
   });
   return pages;
