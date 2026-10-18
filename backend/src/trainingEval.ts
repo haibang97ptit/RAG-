@@ -11,10 +11,12 @@ import type { IndexedFile } from "./qdrantService.js";
  *   (1) phân loại đúng: intent, loại tài liệu, phòng ban, mã SOP;
  *   (2) danh sách / con số bot trả về khớp với kho: ghi rõ thiếu file nào, thừa file nào.
  * Con số và danh sách đúng KHÔNG ghi sẵn mà tính lại từ kho mỗi lần chạy (cách tính riêng, độc lập với code của bot).
+ * Mã / phòng ví dụ mà kho không có (vd SOP QA 0013) → đáp án đúng là "không tìm thấy" / "không có phòng này".
  *
  *   npm run eval:training                  model router thật (Groq) + kho mẫu bên dưới
  *   npm run eval:training -- --offline     không gọi Groq: chỉ nhận diện bằng từ khóa + quy tắc cố định
  *   npm run eval:training -- --live        dùng kho thật đang index trong Qdrant thay cho kho mẫu
+ *   npm run eval:training -- --all-sops    câu sinh tự động cho MỌI SOP trong kho (thêm --live để chạy trên kho thật)
  *   npm run eval:training -- 9 10 28       chỉ chạy các câu số 9, 10, 28
  * Kết quả đầy đủ: .cache/training-eval.json
  *
@@ -45,6 +47,8 @@ interface Case {
   history?: ChatMessage[];
   needsModel?: boolean; // từ khóa không đủ (sai chính tả, câu nối tiếp): bỏ qua khi --offline
   skip?: string;
+  missingDepartments?: string[]; // phòng được hỏi nhưng kho không có: bot phải báo riêng
+  note?: string; // vì sao đáp án được điều chỉnh theo kho đang đo
 }
 
 const QA_COUNT_HISTORY: ChatMessage[] = [
@@ -135,11 +139,11 @@ const FIXTURE_FILES: IndexedFile[] = [
     "FRM-QA-SOP-GEN-0013-02 RECORD MANAGEMENT.docx",
     "FRM-QA-SOP-GEN-0013-F01-01 RECORD LIST.docx",
     "FRM-QA-SOP-GEN-0013-F02-01 RECORD DESTRUCTION FORM.docx",
-    "FRM-QA-SOP-GEN-0013-F03-01 ARCHIVE LOG.docx",
+    "FRM.QA_SOP-GEN.0013-F03.01 ARCHIVE LOG.docx",
     "FRM-QA-SOP-GEN-0013-A01-01 RETENTION PERIOD TABLE.docx",
     "FRM-QA-SOP-GEN-0017-04 QUALITY RISK MANAGEMENT.docx",
     "FRM-QA-SOP-GEN-0020-01 COMPLAINT HANDLING.docx",
-    "FRM-QA-SOP-GEN-0039-02 CHANGE CONTROL.docx",
+    "FRM_QA_SOP-GEN_0039_02 CHANGE CONTROL.docx",
   ]),
   ...fixture("QC", [
     "FRM-QC-SOP-CAL-0003-02 CALIBRATION OF BALANCES.docx",
@@ -154,7 +158,7 @@ const FIXTURE_FILES: IndexedFile[] = [
     "FRM-IT-SOP-GEN-0013-F01-01 ACCOUNT REQUEST FORM.docx",
     "FRM-IT-SOP-GEN-0013-F02-01 PASSWORD RESET LOG.docx",
     "FRM-IT-SOP-GEN-0016-01 COMPUTER SYSTEM VALIDATION.docx",
-    "FRM-IT-SOP-GEN-0016-A01-01 VALIDATION TEMPLATE.docx",
+    "FRM_IT_SOP_GEN_0016_A01_01 VALIDATION TEMPLATE.docx",
   ]),
   ...fixture("HR", [
     "FRM-HR-SOP-GEN-0040-01 RECRUITMENT.docx",
@@ -162,28 +166,44 @@ const FIXTURE_FILES: IndexedFile[] = [
     "FRM-HR-SOP-GEN-0041-F01-01 TRAINING RECORD.docx",
   ]),
   ...fixture("PD", ["FRM.PRD.SOP-MFG.0005-01 GRANULATION.docx", "FRM.PRD.SOP-MFG.0005-F01-01 BATCH RECORD.docx"]),
+  // File test, tên không theo chuẩn: bộ test bỏ qua
+  ...fixture("RA", ["Test upload.docx", "ban thu nghiem.pdf"]),
 ];
 
 // ---------- Đáp án tính từ kho (cách tính riêng, không dùng code của bot) ----------
 
 interface RefDoc {
-  key: string; // "QA|0013|F02"
+  key: string; // "QA|GEN|0013|F02"
   department: string; // theo mã (PRD → PD); không có mã thì theo thư mục
   category: string;
   number: string;
   type: DocType;
   sub: string; // "F02", "A01", "" (SOP chính)
+  series: string; // "GEN"
+  rawDepartment: string; // như viết trong tên file ("PRD")
 }
 
-const CODE_RE = /^FRM[-./]([A-Z]+)[-./]SOP[-./]?(?:[A-Z]+)?[-./](\d{4})(?:[-.]([FA])(\d{1,3}))?/i;
+// Tên file đúng chuẩn: FRM + phòng ban + SOP + nhóm + mã, ngăn cách bằng "-", "_" hoặc "." tùy ý
+// ("FRM-QA-SOP-GEN-0016", "FRM_QA_SOP-GEN_0016", "FRM.QA.SOP-GEN.0005-F11-03")
+const CODE_RE = /^FRM[-_.]([A-Z]+)[-_.]SOP[-_.]([A-Z]+)[-_.](\d{4})(?:[-_.]([FA])(\d{1,3}))?(?![A-Z0-9])/i;
 
 function refDoc(file: IndexedFile): RefDoc | null {
   const m = file.fileName.match(CODE_RE);
   if (!m) return null;
   const department = m[1].toUpperCase() === "PRD" ? "PD" : m[1].toUpperCase();
-  const sub = m[3] ? `${m[3].toUpperCase()}${m[4].padStart(2, "0")}` : "";
-  const type: DocType = !m[3] ? "sop" : m[3].toUpperCase() === "F" ? "form" : "appendix";
-  return { key: `${department}|${m[2]}|${sub}`, department, category: file.category, number: m[2], type, sub };
+  const [, , series, number, mark, subNumber] = m;
+  const sub = mark ? `${mark.toUpperCase()}${subNumber.padStart(2, "0")}` : "";
+  const type: DocType = !mark ? "sop" : mark.toUpperCase() === "F" ? "form" : "appendix";
+  return {
+    key: `${department}|${series.toUpperCase()}|${number}|${sub}`,
+    department,
+    category: file.category,
+    number,
+    type,
+    sub,
+    series: series.toUpperCase(),
+    rawDepartment: m[1].toUpperCase(),
+  };
 }
 
 function refDocs(files: IndexedFile[]): RefDoc[] {
@@ -208,15 +228,81 @@ function expectedKeys(c: Case, docs: RefDoc[]): string[] {
     .map((d) => d.key);
 }
 
-/** Các tài liệu bot liệt kê: dòng "1. FRM-QA-SOP-GEN-0013-F01-01 – RECORD LIST" → khóa. */
+/**
+ * Các tài liệu bot liệt kê: dòng "1. FRM-QA-SOP-GEN-0013-F01-01 – RECORD LIST" → khóa.
+ * Dòng không đọc được mã vẫn giữ lại (dạng "?<tên>") để bị tính là thừa, không bị bỏ qua.
+ */
 function listedKeys(output: string): string[] {
   const keys: string[] = [];
   for (const line of output.split("\n")) {
     const m = line.match(/^\d+\.\s+(\S+)/);
-    const d = m ? refDoc({ fileName: m[1], category: "", filePath: "" }) : null;
-    if (d) keys.push(d.key);
+    if (!m) continue;
+    keys.push(refDoc({ fileName: m[1], category: "", filePath: "" })?.key ?? `?${m[1]}`);
   }
   return keys;
+}
+
+/**
+ * Câu hỏi trong tài liệu training dùng mã / phòng ví dụ (SOP QA 0013, phòng HR...). Kho đang đo không có
+ * thì câu trả lời đúng là "không tìm thấy" / "không có phòng này", không phải danh sách của mã đó.
+ */
+function adaptToCatalog(c: Case, docs: RefDoc[], categories: string[]): Case {
+  if (c.outcome) return c;
+  if (c.code) {
+    const [department, number] = c.code.split(" ");
+    if (!docs.some((d) => d.department === department && d.number === number)) {
+      return { ...c, outcome: "khong_tim_thay", note: `kho không có SOP ${department} ${number}: phải báo không tìm thấy` };
+    }
+    return c;
+  }
+  const missing = (c.departments ?? []).filter((d) => !categories.includes(d));
+  if (missing.length === 0) return c;
+  if (missing.length === c.departments!.length) {
+    return { ...c, outcome: "khong_co_phong", note: `kho không có phòng ${missing.join(", ")}: phải báo không có` };
+  }
+  return {
+    ...c,
+    departments: c.departments!.filter((d) => !missing.includes(d)),
+    missingDepartments: missing,
+    note: `kho không có phòng ${missing.join(", ")}: phải báo riêng`,
+  };
+}
+
+/**
+ * --all-sops: sinh câu hỏi cho MỌI SOP có trong kho (không chỉ mã ví dụ trong tài liệu training):
+ * nhiều cách viết mã × đếm / liệt kê biểu mẫu, phụ lục, tên; tra ngược từng biểu mẫu, phụ lục; đếm / liệt kê theo phòng.
+ */
+function allSopCases(docs: RefDoc[], categories: string[]): Case[] {
+  const cases: Case[] = [];
+  const add = (c: Omit<Case, "id">) => cases.push({ id: 1001 + cases.length, ...c });
+  for (const sop of docs.filter((d) => d.type === "sop")) {
+    const { department: D, number, series, rawDepartment } = sop;
+    const dl = D.toLowerCase();
+    const n = String(Number(number));
+    const code = `${D} ${number}`;
+    const styles = [`sop ${dl} ${n}`, `sop${dl}${n}`, `${D} sop ${number}`, `sop ${n} của ${dl}`, `FRM/${rawDepartment}/SOP-${series}/${number}`];
+    for (const s of styles) {
+      add({ q: `${s} có bao nhiêu biểu mẫu`, intent: "DEM", types: F, code });
+      add({ q: `có mấy f ${s}`, intent: "DEM", types: F, code });
+      add({ q: `các biểu mẫu của ${s}`, intent: "LIET_KE", types: F, code });
+      add({ q: `phụ lục của ${s}`, intent: "LIET_KE", types: A, code });
+      add({ q: `${s} gồm những gì`, intent: "LIET_KE", types: ["form", "appendix"], code });
+      add({ q: `${s} tên là gì`, intent: "THONG_TIN_TAI_LIEU", code });
+    }
+    for (const child of docs.filter((d) => d.department === D && d.number === number && d.type !== "sop")) {
+      const noun = child.type === "form" ? "biểu mẫu" : "phụ lục";
+      add({ q: `${noun} FRM/${rawDepartment}/SOP-${series}/${number}-${child.sub} thuộc sop nào`, intent: "TRA_NGUOC", code: `${code} ${child.sub}` });
+    }
+  }
+  for (const D of categories.filter((c) => /^[A-Z]{2,3}$/.test(c))) {
+    const dl = D.toLowerCase();
+    add({ q: `${D} có bao nhiêu SOP`, intent: "DEM", types: S, departments: [D] });
+    add({ q: `sl sop ${dl}`, intent: "DEM", types: S, departments: [D] });
+    add({ q: `${D} có bao nhiêu biểu mẫu`, intent: "DEM", types: F, departments: [D] });
+    add({ q: `các sop của ${dl}`, intent: "LIET_KE", types: S, departments: [D] });
+    add({ q: `liệt kê phụ lục phòng ${D}`, intent: "LIET_KE", types: A, departments: [D] });
+  }
+  return cases;
 }
 
 // ---------- Chạy một câu như server ----------
@@ -295,6 +381,8 @@ function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: 
     if (c.departments?.length === 0 && !summary.theoPhongBan) problems.push("thiếu số liệu theo từng phòng ban");
     if ((c.types?.length ?? 0) > 1 && !summary.theoLoai) problems.push("thiếu số liệu theo từng loại");
     if (c.code) problems.push(`trả lời theo phòng ban, cần theo mã SOP ${c.code}`);
+    const reported: string[] = summary.phongBanKhongCoTrongKho ?? [];
+    for (const d of c.missingDepartments ?? []) if (!reported.includes(d)) problems.push(`không báo kho thiếu phòng ${d}`);
   } else {
     if (!c.code) problems.push(`trả lời theo mã SOP, cần theo phòng ban: ${output.slice(0, 100)}`);
     else {
@@ -333,9 +421,22 @@ function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: 
 
 /** Khóa các mã có trong câu trả lời (kể cả nằm giữa câu, không chỉ dòng danh sách). */
 function listedOrMentioned(output: string): string[] {
-  return (output.match(/FRM[-./][A-Z]+[-./]SOP[-./A-Z]*\d{4}(?:[-.][FA]\d{1,3})?/gi) ?? [])
+  return (output.match(/FRM[-_.][A-Z]+[-_.]SOP[-_.][A-Z]+[-_.]\d{4}(?:[-_.][FA]\d{1,3})?/gi) ?? [])
     .map((code) => refDoc({ fileName: code, category: "", filePath: "" })?.key)
     .filter((k): k is string => !!k);
+}
+
+/** Số đếm lệch: lấy danh sách bot đếm (hỏi lại kèm danh sách) để chỉ ra file nào thừa, file nào thiếu. */
+async function countDiff(c: Case, route: RoutedQuery, files: IndexedFile[], docs: RefDoc[]): Promise<string | null> {
+  const reply = await replyFor({ ...route, wantsList: true }, files);
+  if (!reply) return null;
+  const listed = listedKeys(reply.kind === "text" ? reply.text : reply.list.markdown);
+  const expected = expectedKeys(c, docs);
+  const missing = expected.filter((k) => !listed.includes(k));
+  const extra = listed.filter((k) => !expected.includes(k));
+  return [extra.length ? `bot đếm thừa: ${extra.join(", ")}` : "", missing.length ? `bot đếm thiếu: ${missing.join(", ")}` : ""]
+    .filter(Boolean)
+    .join("; ") || null;
 }
 
 // ---------- Main ----------
@@ -361,6 +462,7 @@ async function main() {
   const args = process.argv.slice(2);
   const offline = args.includes("--offline");
   const live = args.includes("--live");
+  const allSops = args.includes("--all-sops");
   const ids = args.filter((a) => /^\d+$/.test(a)).map(Number);
 
   let files = FIXTURE_FILES;
@@ -368,34 +470,56 @@ async function main() {
     const { getIndexedFiles } = await import("./fileCatalog.js");
     files = await getIndexedFiles();
   }
-  if (!offline) {
+  if (!offline && !allSops) {
     const { initEmbedder } = await import("./embedding.js");
     await initEmbedder(); // chọn ví dụ gần giống câu hỏi như trên server
   } else {
     console.warn = () => {}; // không có model embedding / Groq: bỏ cảnh báo lặp lại
   }
 
+  // Chỉ đo trên file đặt tên đúng chuẩn; file khác (file test, tên chưa đổi) liệt kê ra để biết mà sửa tên
+  const ignored = files.filter((f) => !refDoc(f));
+  files = files.filter((f) => refDoc(f));
+  if (ignored.length > 0) {
+    console.log(`Bỏ qua ${ignored.length} file tên không đúng chuẩn FRM-<phòng>-SOP-<nhóm>-<mã>:`);
+    for (const f of ignored) console.log(`   ${f.category}/${f.fileName}`);
+    console.log();
+  }
+
   const categories = Array.from(new Set(files.map((f) => f.category))).sort();
   const docs = refDocs(files);
-  const cases = ids.length > 0 ? CASES.filter((c) => ids.includes(c.id)) : CASES;
-  console.log(`Chạy ${cases.length} câu (${offline ? "không gọi model, chỉ từ khóa + quy tắc" : "model router thật"}, ${live ? "kho thật" : "kho mẫu"} ${files.length} file)...\n`);
+  // --all-sops: câu sinh tự động cho mọi SOP, nhận diện bằng từ khóa + quy tắc (không gọi model, không tốn hạn mức Groq)
+  const source = allSops ? allSopCases(docs, categories) : CASES;
+  const cases = (ids.length > 0 ? source.filter((c) => ids.includes(c.id)) : source).map((c) => adaptToCatalog(c, docs, categories));
+  const heuristic = offline || allSops;
+  console.log(
+    `Chạy ${cases.length} câu${allSops ? " sinh cho mọi SOP trong kho" : ""} (${heuristic ? "không gọi model, chỉ từ khóa + quy tắc" : "model router thật"}, ${live ? "kho thật" : "kho mẫu"} ${files.length} file)...\n`
+  );
 
   const results: any[] = [];
   let stopReason: string | null = null;
   for (const c of cases) {
-    const skip = c.skip ?? (offline && c.needsModel ? "cần model (chạy không --offline)" : null);
+    const skip = c.skip ?? (heuristic && c.needsModel ? "cần model (chạy không --offline)" : null);
     if (skip) {
       results.push({ id: c.id, q: c.q, skipped: skip });
       console.log(`- #${c.id} ${c.q}  → bỏ qua: ${skip}`);
       continue;
     }
     try {
-      const route = await routeWithRetry(c, categories, offline);
+      const route = await routeWithRetry(c, categories, heuristic);
       const reply = await replyFor(route, files);
       const problems = check(c, route, reply, docs);
+      if (problems.some((p) => p.startsWith("đếm được"))) {
+        const diff = await countDiff(c, route, files, docs);
+        if (diff) problems.push(diff);
+      }
       const output = reply ? (reply.kind === "text" ? reply.text : `${reply.list.fallbackIntro}${reply.list.markdown}`) : null;
-      results.push({ id: c.id, q: c.q, ok: problems.length === 0, problems, route, output });
-      console.log(`${problems.length === 0 ? "✓" : "✗"} #${c.id} ${c.q}${problems.length ? `  → ${problems.join("; ")}` : ""}`);
+      results.push({ id: c.id, q: c.q, ok: problems.length === 0, problems, note: c.note, route, output });
+      // --all-sops có rất nhiều câu: chỉ in câu sai
+      if (!allSops || problems.length > 0) {
+        const note = c.note ? `  (${c.note})` : "";
+        console.log(`${problems.length === 0 ? "✓" : "✗"} #${c.id} ${c.q}${note}${problems.length ? `  → ${problems.join("; ")}` : ""}`);
+      }
     } catch (err) {
       stopReason = (err as Error).message;
       results.push({ id: c.id, q: c.q, ok: false, problems: [`lỗi: ${stopReason}`] });
@@ -408,7 +532,7 @@ async function main() {
   const ran = results.filter((r) => !r.skipped);
   const passed = ran.filter((r) => r.ok).length;
   await fs.mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
-  await fs.writeFile(OUTPUT_PATH, JSON.stringify({ passed, total: ran.length, offline, live, stopReason, results }, null, 2), "utf-8");
+  await fs.writeFile(OUTPUT_PATH, JSON.stringify({ passed, total: ran.length, offline, live, allSops, ignored, stopReason, results }, null, 2), "utf-8");
 
   console.log(`\nĐúng ${passed}/${ran.length} câu${results.length > ran.length ? ` (bỏ qua ${results.length - ran.length})` : ""}.`);
   if (stopReason) console.log(`Dừng sớm: ${stopReason}`);

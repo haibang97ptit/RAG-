@@ -180,14 +180,18 @@ const DOC_TASKS: Task[] = ["chitchat", "sop_question", "doc_overview", "doc_inve
  */
 function applyDocRules(route: RoutedQuery, query: string): RoutedQuery {
   if (!DOC_TASKS.includes(route.task)) return route;
-  const q = route.standaloneQuery;
+  // Xét trên câu GỐC: model có thể viết lại làm đổi nghĩa ("sop qa 13 gồm những gì" → "nội dung SOP QA 0013 gồm
+  // những gì"). Câu nối tiếp ("còn IT thì sao") thì câu gốc thiếu ý, phải dùng câu đã viết lại.
+  const q = route.followUp ? route.standaloneQuery : query;
   let task = route.task;
   if (isBareTypeQuestion(query)) task = "doc_inventory"; // "sop" trơn → hỏi lại phòng nào
   else if (task === "chitchat") return route;
   else if (isSopContentQuestion(q)) task = task === "doc_overview" ? task : "sop_question";
   else if (isParentLookupQuestion(q) || isDocInfoQuestion(q)) task = "doc_lookup";
   else if (isSopScopeInventoryQuestion(q) || isTypeAndDepartmentOnly(q)) task = "doc_inventory";
-  return task === route.task ? route : { ...route, task };
+  if (task === route.task) return route;
+  // Đã đổi nhánh theo câu gốc → bước sau cũng đọc câu gốc, không đọc câu model viết lại
+  return { ...route, task, standaloneQuery: route.followUp ? route.standaloneQuery : query };
 }
 
 /** Như trước khi có bước hiểu câu hỏi: nhận diện bằng từ khóa. Dùng khi model lỗi. */

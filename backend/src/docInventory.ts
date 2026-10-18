@@ -393,28 +393,29 @@ function departmentReply(
   typesNamed: DocType[]
 ): InventoryReply {
   const folded = expandAbbreviations(query);
-  // Không cộng gộp các loại: "biểu mẫu và phụ lục" → đếm riêng từng loại. "tài liệu" chung chung → cả ba.
+  // Câu nêu rõ loại thì theo câu, không theo model. Không cộng gộp các loại. "tài liệu" chung chung → cả ba, đếm riêng.
   const namedSpecific = typesNamed.includes("form") || typesNamed.includes("appendix")
     ? typesNamed.filter((t) => t !== "sop")
     : typesNamed;
-  const types: DocType[] = options.docTypes?.length
-    ? options.docTypes
-    : words(ALL_WORDS).test(folded) && namedSpecific.length === 0
-      ? ALL_TYPES
-      : namedSpecific.length > 0
-        ? namedSpecific
-        : ["sop"];
+  const types: DocType[] =
+    namedSpecific.length > 0
+      ? namedSpecific
+      : words(ALL_WORDS).test(folded)
+        ? ALL_TYPES
+        : options.docTypes?.length
+          ? options.docTypes
+          : ["sop"];
+  // Phòng model tách ra + phòng ghi rõ trong câu ("sop của QA và QC": model đôi khi bỏ sót một phòng)
   const routedDepartments = (options.departments ?? []).filter((d) => categories.includes(d));
-  const departments = routedDepartments.length > 0 ? routedDepartments : departmentsIn(query, categories);
-  // Nhắc tới phòng ban không có trong kho ("phòng HR", "phòng ABC") → kết quả 0, không phải đếm cả công ty
-  const missingDepartments =
-    departments.length === 0
-      ? Array.from(new Set([...mentionedDepartmentCodes(query), ...unknownDepartments(query)]))
-      : [];
-
-  const inScope = files.filter((f) =>
-    missingDepartments.length > 0 ? false : departments.length === 0 || departments.includes(f.category)
+  const departments = Array.from(new Set([...routedDepartments, ...departmentsIn(query, categories)])).sort();
+  // Phòng được nhắc nhưng không có trong kho ("phòng HR", "phòng ABC"): báo riêng, không đếm nhầm sang cả công ty
+  const inCatalog = new Set(categories.map((c) => c.toUpperCase()));
+  const missingDepartments = Array.from(new Set([...mentionedDepartmentCodes(query), ...unknownDepartments(query)])).filter(
+    (d) => !inCatalog.has(d) && !departments.some((found) => found.toUpperCase() === d)
   );
+  const onlyMissing = departments.length === 0 && missingDepartments.length > 0;
+
+  const inScope = files.filter((f) => !onlyMissing && (departments.length === 0 || departments.includes(f.category)));
   const entries = collectDocuments(inScope).filter((e) => types.includes(e.type));
   // Câu đếm chỉ trả số; liệt kê khi người dùng yêu cầu. Câu không có từ đếm ("các sop của qa", "sop qa") là liệt kê.
   const wantsList = options.wantsList === true || LIST_WORDS.test(folded) || !COUNT_WORDS.test(folded);
@@ -423,7 +424,7 @@ function departmentReply(
     phamVi:
       departments.length > 0
         ? `phòng ${departments.join(", ")}`
-        : missingDepartments.length > 0
+        : onlyMissing
           ? `phòng ${missingDepartments.join(", ")}`
           : "tất cả phòng ban",
     phongBanKhongCoTrongKho: missingDepartments.length > 0 ? missingDepartments : undefined,
@@ -431,7 +432,7 @@ function departmentReply(
     loaiTaiLieu: types.map((t) => TYPE_LABELS[t]).join(", "),
     tongSo: entries.length,
     soFile: entries.reduce((sum, e) => sum + e.fileCount, 0),
-    theoPhongBan: departments.length === 1 || missingDepartments.length > 0 ? undefined : countBy(entries, (e) => e.category),
+    theoPhongBan: departments.length === 1 || onlyMissing ? undefined : countBy(entries, (e) => e.category),
     theoLoai: types.length > 1 ? countBy(entries, (e) => TYPE_LABELS[e.type]) : undefined,
     cachDem:
       "Mỗi mã tài liệu tính là 1 (nhiều file cùng mã như bản dịch, bản PDF và Word chỉ tính 1). " +
@@ -441,11 +442,15 @@ function departmentReply(
 
   // Câu mở đầu dựng sẵn khi LLM lỗi. Các loại nêu riêng từng con số, không cộng gộp.
   const counts = types.map((t) => `**${entries.filter((e) => e.type === t).length}** ${TYPE_NOUNS[t]}`).join(", ");
-  const fallbackIntro =
+  const missingNote =
     missingDepartments.length > 0
-      ? `Kho tài liệu trợ lý đang có không có tài liệu của ${summary.phamVi}. Các phòng hiện có: ${categories.join(", ")}.`
-      : `Theo danh mục tài liệu trợ lý đang có, ${summary.phamVi} có ${counts}.` +
-        (wantsList || entries.length === 0 ? "" : " Bạn có muốn xem danh sách không?");
+      ? `Kho tài liệu trợ lý đang có không có tài liệu của phòng ${missingDepartments.join(", ")}. Các phòng hiện có: ${categories.join(", ")}.`
+      : "";
+  const fallbackIntro = onlyMissing
+    ? missingNote
+    : `Theo danh mục tài liệu trợ lý đang có, ${summary.phamVi} có ${counts}.` +
+      (missingNote ? ` ${missingNote}` : "") +
+      (wantsList || entries.length === 0 ? "" : " Bạn có muốn xem danh sách không?");
   return {
     kind: "list",
     summaryJson: JSON.stringify(summary, null, 1),

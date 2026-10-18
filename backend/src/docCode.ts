@@ -89,7 +89,8 @@ export function expandAbbreviations(query: string): string {
   return fold(query.normalize("NFC"))
     .replace(new RegExp(`${B}ds${TYPE_AFTER}`, "g"), "danh sach")
     .replace(new RegExp(`${B}sl(?![a-z0-9])`, "g"), "so luong")
-    .replace(/(?<![a-z0-9./-])f(?=\s+(?:cua\s+)?(?:sop|quy trinh|qt|frm)(?![a-z]))/g, "bieu mau")
+    // "f sop qa 13", "f sopqa13", "f qa sop 13", "f của FRM/..."
+    .replace(new RegExp(`(?<![a-z0-9./-])f(?=\\s+(?:cua\\s+)?(?:(?:${DEPARTMENT_CODES.join("|")})${SEP})?(?:sop|quy trinh|qt|frm))`, "g"), "bieu mau")
     .replace(/(?<=\d\s+)f(?![a-z0-9./-])/g, "bieu mau");
 }
 

@@ -781,7 +781,7 @@ Nhiệm vụ: viết PHẦN MỞ ĐẦU ngắn gọn.
 2. Một câu ngắn giải thích cách đếm theo "cachDem".
 3. Lưu ý ngắn rằng đây là số tài liệu trợ lý đang có trong kho tra cứu, có thể khác danh mục chính thức của phòng ban (ví dụ file scan chưa đọc được hoặc chưa được đưa vào thư mục).
 4. Nếu "danhSachBenDuoi" là true: danh sách sẽ được hệ thống TỰ ĐỘNG hiển thị ngay bên dưới, KHÔNG tự liệt kê tên tài liệu và không viết câu "dưới đây là danh sách". Nếu false (người dùng chỉ hỏi số lượng): KHÔNG liệt kê, kết thúc bằng câu hỏi "Bạn có muốn xem danh sách không?".
-5. Nếu "tongSo" là 0: nói không tìm thấy tài liệu nào thuộc phạm vi đó, không suy đoán. Nếu có "phongBanKhongCoTrongKho" thì nói rõ kho không có phòng ban đó, và liệt kê các phòng trong "phongBanCoTrongKho".
+5. Nếu "tongSo" là 0: nói không tìm thấy tài liệu nào thuộc phạm vi đó, không suy đoán. Nếu có "phongBanKhongCoTrongKho" (kể cả khi các phòng khác vẫn có số liệu) thì nói rõ kho không có tài liệu của các phòng đó, và liệt kê các phòng trong "phongBanCoTrongKho".
 6. Tối đa khoảng 10 dòng. Trả lời bằng ngôn ngữ người dùng đang dùng (thường là tiếng Việt; hỏi bằng tiếng Anh thì trả lời tiếng Anh).
 
 ${VOICE_RULES}`;
