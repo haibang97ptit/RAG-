@@ -93,10 +93,8 @@ const CASES: Case[] = [
     "thời gian lưu hồ sơ lô là bao lâu",
     "ai chịu trách nhiệm phê duyệt deviation",
   ].map((q) => ({ group: "noi-dung", q, expect: { task: "sop_question" as Task } })),
-  ...[
-    "sop qa 0005 có bao nhiêu biểu mẫu",
-    "biểu mẫu F07 của SOP 0005 dùng để làm gì",
-  ].map((q) => ({ group: "noi-dung-theo-ma", q, expect: { task: "sop_question" as Task, hasDocCodes: true } })),
+  { group: "noi-dung-theo-ma", q: "biểu mẫu F07 của SOP 0005 dùng để làm gì", expect: { task: "sop_question", hasDocCodes: true } },
+  { group: "inventory-theo-ma", q: "sop qa 0005 có bao nhiêu biểu mẫu", expect: { task: "doc_inventory", docTypes: ["form"], hasDocCodes: true, wantsList: false } },
 
   // ---- Tổng quan một tài liệu ----
   ...[

@@ -35,7 +35,7 @@ import {
 import { selectDisplayedSources, type UiSource } from "./citedSources.js";
 import { answerDataForQualzen, QUALZEN_LIST_HEADING } from "./qualzenAssistant.js";
 import { findOverlapContext, type OverlapContext } from "./overlapFinder.js";
-import { INVENTORY_LIST_HEADING, inventoryReplyFor } from "./docInventory.js";
+import { INVENTORY_LIST_HEADING, docLookupReplyFor, inventoryReplyFor, type InventoryReply } from "./docInventory.js";
 import { routeQuery, type RoutedQuery } from "./queryRouter.js";
 import { DIFF_LIST_HEADING, diffDocuments, diffSummaryForAi, renderDiffList } from "./docDiff.js";
 import { expandWithGlossary } from "./glossary.js";
@@ -304,6 +304,8 @@ interface PreparedReply {
   maxTokens: number;
   // Danh sách dài: server in thẳng sau phần mở đầu của LLM (không tốn token)
   list: { markdown: string; fallbackIntro: string } | null;
+  // Câu trả lời dựng sẵn (hỏi lại, biểu mẫu của một SOP, tra ngược): trả thẳng, không gọi LLM
+  fixedText?: string;
 }
 
 /**
@@ -326,7 +328,23 @@ async function qualzenReplyFor(query: string, history: ChatMessage[], routed: bo
     : { prompt: buildQualzenSystemPrompt(data.dataJson, data.queriedAt), maxTokens: QUALZEN_MAX_ANSWER_TOKENS, list: null };
 }
 
-/** "Phòng QA có bao nhiêu SOP", "liệt kê biểu mẫu của IT": đếm trên danh mục file thay vì đoạn trích. */
+function preparedFromInventory(inventory: InventoryReply, question: string): PreparedReply {
+  if (inventory.kind === "text") {
+    fastify.log.info({ question, summary: inventory.summary }, "inventory_query");
+    return { prompt: "", maxTokens: 0, list: null, fixedText: inventory.text };
+  }
+  fastify.log.info({ question, summary: JSON.parse(inventory.summaryJson) }, "inventory_query");
+  return {
+    prompt: buildInventoryIntroPrompt(inventory.summaryJson),
+    maxTokens: INVENTORY_INTRO_MAX_TOKENS,
+    list: inventory.list,
+  };
+}
+
+/**
+ * "Phòng QA có bao nhiêu SOP", "liệt kê biểu mẫu của IT", "sop qa 13 có mấy biểu mẫu":
+ * đếm trên danh mục file thay vì đoạn trích.
+ */
 async function inventoryReplyForRoute(route: RoutedQuery): Promise<PreparedReply | null> {
   const fromModel = route.source === "llm";
   const inventory = await inventoryReplyFor(route.standaloneQuery, {
@@ -334,15 +352,15 @@ async function inventoryReplyForRoute(route: RoutedQuery): Promise<PreparedReply
     departments: fromModel ? route.departments : undefined,
     docTypes: fromModel ? route.docTypes : undefined,
     wantsList: route.wantsList,
+    docCodes: route.docCodes,
   });
-  if (!inventory) return null;
+  return inventory ? preparedFromInventory(inventory, route.standaloneQuery) : null;
+}
 
-  fastify.log.info({ question: route.standaloneQuery, summary: JSON.parse(inventory.summaryJson) }, "inventory_query");
-  return {
-    prompt: buildInventoryIntroPrompt(inventory.summaryJson),
-    maxTokens: INVENTORY_INTRO_MAX_TOKENS,
-    list: inventory.list,
-  };
+/** "F02 thuộc sop nào", "sop qa 13 tên là gì": tra trên danh mục file. */
+async function docLookupReplyForRoute(route: RoutedQuery): Promise<PreparedReply | null> {
+  const lookup = await docLookupReplyFor(route.standaloneQuery, { docCodes: route.docCodes });
+  return lookup ? preparedFromInventory(lookup, route.standaloneQuery) : null;
 }
 
 /** Rà quy định trùng lặp / so sánh giữa các SOP → các cặp đoạn gần nghĩa nhất để LLM phân tích. */
@@ -420,6 +438,10 @@ async function overlapContextFor(route: RoutedQuery, catalog: CatalogMatch | nul
  * (vd hết hạn mức Groq) thì vẫn trả danh sách, kèm một câu mở đầu dựng sẵn.
  */
 async function* streamPreparedAnswer(reply: PreparedReply, messages: ChatMessage[]): AsyncGenerator<string> {
+  if (reply.fixedText !== undefined) {
+    yield reply.fixedText;
+    return;
+  }
   let wroteAny = false;
   try {
     for await (const delta of streamChatCompletion(reply.prompt, messages, reply.maxTokens)) {
@@ -474,6 +496,12 @@ async function prepareAnswer(query: string, history: ChatMessage[], emit: Emit =
   if (route.task === "doc_inventory") {
     const inventory = await inventoryReplyForRoute(route);
     if (inventory) return noSources(inventory);
+  }
+
+  // Tra một tài liệu theo mã: thuộc SOP nào, tên. Không có mã khớp → tìm trong tài liệu như thường
+  if (route.task === "doc_lookup") {
+    const lookup = await docLookupReplyForRoute(route);
+    if (lookup) return noSources(lookup);
   }
 
   // Còn lại: tìm trong tài liệu SOP

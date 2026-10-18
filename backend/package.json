@@ -12,6 +12,7 @@
     "qualzen:explore": "npx tsx src/qualzenExplore.ts",
     "qualzen:smoke": "npx tsx src/qualzenSmoke.ts",
     "eval:router": "npx tsx src/routerEval.ts",
+    "eval:training": "npx tsx src/trainingEval.ts",
     "feedback:report": "npx tsx src/feedbackReport.ts",
     "build": "tsc",
     "type-check": "tsc --noEmit"

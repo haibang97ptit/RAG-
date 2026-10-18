@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { listIndexedFileEntries, type IndexedFile } from "./qdrantService.js";
+import { fileMatchesCode, parseDocCodes, parseFileCode } from "./docCode.js";
 
 /**
  * Tra danh mục file theo mã tài liệu trong câu hỏi.
@@ -68,12 +69,34 @@ export function matchFileGroupsByCode(
   files: IndexedFile[],
   preferredCategory: string = ""
 ): IndexedFile[][] {
-  const queryTokens = Array.from(new Set(tokenize(query)));
-  const docNumbers = queryTokens.filter(isDocNumber);
-  if (docNumbers.length === 0) return [];
-
-  const codeTokens = queryTokens.filter(isCodeToken);
   const groups: IndexedFile[][] = [];
+  const preferInCategory = (group: IndexedFile[]) => {
+    const preferred = group.filter((f) => f.category.toLowerCase() === preferredCategory.toLowerCase());
+    return preferred.length > 0 && preferred.length < group.length ? preferred : group;
+  };
+
+  // Mã viết theo kiểu SOP ("sop qa 13", "sopqa13", "FRM/IT/SOP-GEN/0013-F01"): so theo mã đã chuẩn hoá
+  const covered = new Set<string>();
+  for (const code of parseDocCodes(query)) {
+    covered.add(code.number);
+    let group = files.filter((f) => {
+      const fileCode = parseFileCode(f.fileName);
+      return !!fileCode && fileMatchesCode(fileCode, f.category, code);
+    });
+    // Nêu đích danh biểu mẫu / phụ lục ("...-F02") → chỉ file đó, nếu có
+    const exact = group.filter((f) => {
+      const s = parseFileCode(f.fileName)?.sub;
+      return !!code.sub && s?.kind === code.sub.kind && Number(s.number) === Number(code.sub.number);
+    });
+    if (exact.length > 0) group = exact;
+    if (!code.department) group = preferInCategory(group);
+    if (group.length > 0) groups.push(group.sort((a, b) => a.fileName.localeCompare(b.fileName)));
+  }
+
+  // Cách viết khác ("0005 và 0017 của QA", "P.IT.1016"): chấm điểm theo các phần mã như trước
+  const queryTokens = Array.from(new Set(tokenize(query)));
+  const docNumbers = queryTokens.filter((t) => isDocNumber(t) && !covered.has(t.padStart(4, "0")));
+  const codeTokens = queryTokens.filter(isCodeToken);
   for (const docNumber of docNumbers) {
     const candidates = files
       .map((file) => ({ file, tokens: codePartTokens(file.fileName, docNumber) }))
@@ -83,14 +106,9 @@ export function matchFileGroupsByCode(
         score: codeTokens.filter((t) => tokens.has(t)).length,
       }));
     const best = Math.max(0, ...candidates.map((c) => c.score));
-    let group = candidates.filter((c) => c.score === best).map((c) => c.file);
-
-    // Gọi tắt ("SOP 0005") mà nhiều phòng ban cùng có số này → lấy phòng ban mặc định.
-    // Nếu user ghi rõ phòng ban ("SOP IT 0005") thì bước chấm điểm ở trên đã chọn đúng rồi.
-    const preferred = group.filter(
-      (f) => f.category.toLowerCase() === preferredCategory.toLowerCase()
-    );
-    if (preferred.length > 0 && preferred.length < group.length) group = preferred;
+    // Gọi tắt ("0005") mà nhiều phòng ban cùng có số này → lấy phòng ban mặc định.
+    // Nếu user ghi rõ phòng ban thì bước chấm điểm ở trên đã chọn đúng rồi.
+    const group = preferInCategory(candidates.filter((c) => c.score === best).map((c) => c.file));
 
     if (group.length > 0) groups.push(group.sort((a, b) => a.fileName.localeCompare(b.fileName)));
   }
