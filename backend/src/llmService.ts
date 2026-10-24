@@ -3,6 +3,11 @@ import { config } from "./config.js";
 import type { SearchResult } from "./qdrantService.js";
 import type { CatalogMatch } from "./fileCatalog.js";
 import type { OverlapContext } from "./overlapFinder.js";
+import { recordUsage } from "./llmUsage.js";
+
+// Các tác vụ phân tích ngắn chạy trên model router (gpt-oss, có bước suy luận). max_tokens tính cả token
+// suy luận, nên phải đủ rộng; reasoning_effort "low" để suy luận ngắn.
+const SHORT_TASK_MAX_TOKENS = 800;
 
 let groqClient: Groq | null = null;
 
@@ -105,20 +110,14 @@ Phân loại tin nhắn user vào 1 trong 3 loại:
 CHỈ trả lời DUY NHẤT 1 từ: NEW_QUESTION / FOLLOW_UP / CHITCHAT.`;
 
   try {
-    const response = await getGroq().chat.completions.create({
-      model: config.routerModel,
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `Lịch sử:\n${historyText}\n\nTin nhắn mới: "${userMessage}"\n\nPhân loại:`,
-        },
-      ],
-      temperature: 0,
-      max_tokens: 10,
-    });
-
-    const result = response.choices[0]?.message?.content?.trim().toUpperCase() || "";
+    const content = await callRouterStrict(
+      systemPrompt,
+      `Lịch sử:\n${historyText}\n\nTin nhắn mới: "${userMessage}"\n\nPhân loại:`,
+      SHORT_TASK_MAX_TOKENS,
+      "low",
+      "intent"
+    );
+    const result = content.toUpperCase();
     if (result.includes("FOLLOW_UP") || result.includes("FOLLOWUP")) return "FOLLOW_UP";
     if (result.includes("CHITCHAT") || result.includes("CHIT_CHAT")) return "CHITCHAT";
     return "NEW_QUESTION";
@@ -205,20 +204,13 @@ QUY TẮC:
 - KHÔNG trả lời câu hỏi. CHỈ trả về câu truy vấn trên 1 dòng, không giải thích, không ngoặc kép.`;
 
   try {
-    const response = await getGroq().chat.completions.create({
-      model: config.routerModel,
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `Lịch sử:\n${historyText}\n\nTin nhắn mới: "${userMessage}"\n\nTruy vấn độc lập:`,
-        },
-      ],
-      temperature: 0,
-      max_tokens: 400,
-    });
-
-    const content = response.choices[0]?.message?.content?.trim() || "";
+    const content = await callRouterStrict(
+      systemPrompt,
+      `Lịch sử:\n${historyText}\n\nTin nhắn mới: "${userMessage}"\n\nTruy vấn độc lập:`,
+      SHORT_TASK_MAX_TOKENS,
+      "low",
+      "rewrite"
+    );
     const rewritten = content.split("\n")[0].replace(/^["'“”]+|["'“”]+$/g, "").trim();
     if (!rewritten || rewritten.length > 500) return userMessage;
     return rewritten;
@@ -243,19 +235,13 @@ Trả về CHÍNH XÁC JSON array 3 strings, KHÔNG giải thích, KHÔNG markdo
 Ví dụ: ["biến thể 1", "biến thể 2", "biến thể 3"]`;
 
   try {
-    const response = await getGroq().chat.completions.create({
-      model: config.routerModel,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: `Câu hỏi: "${query}"\n\nTrả về JSON:` },
-      ],
-      temperature: 0, // cùng câu hỏi → cùng biến thể → cùng đoạn trích
-      max_tokens: 300,
-    });
-
-    const content = response.choices[0]?.message?.content?.trim() || "";
+    // temperature 0 (trong callRouterStrict): cùng câu hỏi → cùng biến thể → cùng đoạn trích
+    const content = await callRouterStrict(systemPrompt, `Câu hỏi: "${query}"\n\nTrả về JSON:`, SHORT_TASK_MAX_TOKENS, "low", "expand");
     const match = content.match(/\[[\s\S]*?\]/);
-    if (!match) return [];
+    if (!match) {
+      console.warn(`Query expansion: không đọc được kết quả, bỏ qua bước này: ${content.slice(0, 100)}`);
+      return [];
+    }
 
     const variants = JSON.parse(match[0]) as string[];
     return Array.isArray(variants) ? variants.filter((s) => typeof s === "string").slice(0, 3) : [];
@@ -275,16 +261,10 @@ Dùng tiếng Việt chuyên nghiệp + có thể lẫn 1 số thuật ngữ ti�
 KHÔNG thêm giải thích, chỉ viết đoạn văn.`;
 
   try {
-    const response = await getGroq().chat.completions.create({
-      model: config.routerModel,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: query },
-      ],
-      temperature: 0,
-      max_tokens: 300,
-    });
-    return response.choices[0]?.message?.content?.trim() || "";
+    // Đoạn 3-5 câu (~200 token) + suy luận
+    const content = await callRouterStrict(systemPrompt, query, 1000, "low", "hyde");
+    if (!content) console.warn("HyDE: model không trả đoạn giả định, chỉ tìm bằng câu hỏi gốc");
+    return content;
   } catch (err) {
     console.warn("HyDE generation failed:", (err as Error).message);
     return "";
@@ -321,22 +301,18 @@ QUY TẮC:
 Ví dụ output: [3, 7, 1, 12, 5]`;
 
   try {
-    const response = await getGroq().chat.completions.create({
-      model: config.routerModel,
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `Câu hỏi: "${query}"\n\nCác đoạn:\n\n${chunksText}\n\nJSON top ${topK}:`,
-        },
-      ],
-      temperature: 0,
-      max_tokens: 300,
-    });
-
-    const content = response.choices[0]?.message?.content?.trim() || "";
+    const content = await callRouterStrict(
+      systemPrompt,
+      `Câu hỏi: "${query}"\n\nCác đoạn:\n\n${chunksText}\n\nJSON top ${topK}:`,
+      SHORT_TASK_MAX_TOKENS,
+      "low",
+      "rerank"
+    );
     const match = content.match(/\[[\d,\s]+\]/);
-    if (!match) return chunks.slice(0, topK);
+    if (!match) {
+      console.warn(`Rerank: không đọc được kết quả, lấy ${topK} đoạn đầu theo độ giống: ${content.slice(0, 100)}`);
+      return chunks.slice(0, topK);
+    }
 
     const indices = JSON.parse(match[0]) as number[];
     const selected: SearchResult[] = [];
@@ -680,8 +656,19 @@ export async function callRouterStrict(
   systemPrompt: string,
   userContent: string,
   maxTokens: number = 600,
-  reasoningEffort?: "low" | "medium"
+  reasoningEffort?: "low" | "medium",
+  step: string = "router" // tên bước, để đếm token theo từng bước (llmUsage.ts)
 ): Promise<string> {
+  const read = (response: Awaited<ReturnType<typeof request>>) => {
+    recordUsage(step, config.routerModel, response.usage);
+    const choice = response.choices[0];
+    const content = choice?.message?.content?.trim() || "";
+    // gpt-oss tính cả token suy luận vào max_tokens: hết token khi còn đang suy luận → không có kết quả
+    if (!content && choice?.finish_reason === "length") {
+      console.warn(`Model router (${step}) dùng hết ${maxTokens} token mà chưa trả kết quả`);
+    }
+    return content;
+  };
   const request = (withEffort: boolean) =>
     getGroq().chat.completions.create({
       model: config.routerModel,
@@ -697,14 +684,12 @@ export async function callRouterStrict(
 
   const useEffort = !!reasoningEffort && reasoningEffortSupported;
   try {
-    const response = await request(useEffort);
-    return response.choices[0]?.message?.content?.trim() || "";
+    return read(await request(useEffort));
   } catch (err) {
     if (!useEffort || (err as any)?.status !== 400) throw err;
     reasoningEffortSupported = false;
     console.warn("Model router không nhận reasoning_effort, gọi lại không có tham số này");
-    const response = await request(false);
-    return response.choices[0]?.message?.content?.trim() || "";
+    return read(await request(false));
   }
 }
 
@@ -712,10 +697,11 @@ export async function callRouterStrict(
 export async function callRouter(
   systemPrompt: string,
   userContent: string,
-  maxTokens: number = 600
+  maxTokens: number = 600,
+  step: string = "router"
 ): Promise<string> {
   try {
-    return await callRouterStrict(systemPrompt, userContent, maxTokens);
+    return await callRouterStrict(systemPrompt, userContent, maxTokens, undefined, step);
   } catch (err) {
     console.warn("Router call failed:", (err as Error).message);
     return "";
@@ -765,6 +751,63 @@ Danh sách từng phiếu sẽ được hệ thống TỰ ĐỘNG hiển thị n
 3. Nếu "tongSo" lớn hơn "soDongHienThi": nói danh sách bên dưới gồm "soDongHienThi" phiếu.
 4. KHÔNG liệt kê từng phiếu, KHÔNG bịa mã phiếu. Không viết câu kiểu "dưới đây là danh sách" ở cuối, hệ thống tự thêm tiêu đề.
 5. Ngắn gọn, tối đa khoảng 12 dòng. Trả lời bằng tiếng Việt.
+
+${VOICE_RULES}`;
+}
+
+export interface UploadExcerpt {
+  fileName: string;
+  section: string;
+  text: string;
+}
+
+/**
+ * Hỏi về nội dung file người dùng vừa upload (không nằm trong kho).
+ * @param mode "whole" = nguyên file; "relevant" = các đoạn giống câu hỏi nhất; "spread" = các đoạn trải đều
+ *             cả file (câu tóm tắt / tổng quan), kèm danh sách mục của cả file trong `outline`
+ */
+export function buildUploadQaPrompt(excerpts: UploadExcerpt[], mode: "whole" | "relevant" | "spread", outline = ""): string {
+  const scope = {
+    whole: "Bên dưới là TOÀN BỘ file.",
+    relevant:
+      "Bên dưới chỉ là các đoạn giống câu hỏi nhất, không phải toàn bộ file. Không thấy thông tin thì nói không tìm thấy trong các đoạn liên quan, gợi ý hỏi cụ thể hơn; KHÔNG khẳng định cả file không có.",
+    spread:
+      "File dài nên bên dưới là DANH SÁCH MỤC của cả file và các đoạn lấy RẢI ĐỀU từ đầu tới cuối (ưu tiên đầu mỗi mục), không phải toàn bộ nội dung. Tóm tắt theo khung các mục; mục nào không có đoạn trích thì chỉ nêu tên mục, không đoán nội dung. Cuối câu trả lời nói ngắn gọn rằng chi tiết từng mục có thể chưa đủ, người dùng hỏi riêng từng mục để xem kỹ.",
+  }[mode];
+  const blocks = excerpts
+    .map((e) => `File: ${e.fileName}${e.section ? ` | Mục: ${e.section}` : ""}\n${e.text}`)
+    .join("\n\n═══════════════════════════════\n\n");
+  return `Bạn là trợ lý AI nội bộ của công ty dược phẩm. Người dùng vừa TẢI LÊN file của họ (bản nháp, tài liệu bên ngoài...) và hỏi về nội dung file đó. File này KHÔNG nằm trong kho SOP.
+
+QUY TẮC:
+1. CHỈ trả lời dựa trên nội dung file bên dưới, không bịa, không dùng kiến thức riêng.
+2. Người dùng hỏi một đoạn nằm ở đâu: trích nguyên văn đoạn đó (ngắn gọn) và ghi rõ mục ("Mục 5.3 ...").
+3. Ghi nguồn bằng tên file khi có nhiều file. Không ghi "Nguồn 1".
+4. ${scope}
+5. Trả lời bằng ngôn ngữ người dùng đang dùng.
+
+${VOICE_RULES}
+
+${FORMAT_RULES}
+${outline ? `\nDANH SÁCH MỤC CỦA FILE:\n${outline}\n` : ""}
+NỘI DUNG FILE TẢI LÊN:
+
+${blocks}`;
+}
+
+/** File upload so với kho: các cặp đoạn giống nhau nhất để LLM nêu SOP nào trùng / liên quan. */
+export function buildUploadRepoMatchPrompt(fileName: string, pairsText: string): string {
+  return `Bạn là trợ lý rà soát tài liệu SOP của công ty dược. Người dùng tải lên file "${fileName}" và muốn biết nội dung của nó đã có / trùng / liên quan tới SOP nào trong kho.
+
+Máy đã lấy từng đoạn của file đi tìm đoạn giống nhất trong kho. Kết quả (xếp theo SOP có nhiều đoạn giống nhất):
+
+${pairsText}
+
+Nhiệm vụ:
+1. Nêu các SOP trong kho có nội dung trùng hoặc liên quan nhiều nhất tới file, mỗi SOP một gạch đầu dòng: tên file SOP, những mục nào của file tải lên giống mục nào của SOP.
+2. Phân biệt rõ: TRÙNG gần như nguyên văn, CÙNG CHỦ ĐỀ nhưng nội dung khác (nêu khác ở đâu), hay chỉ giống vài từ (bỏ qua).
+3. Nếu không có cặp nào thật sự giống: nói nội dung file chưa có trong kho.
+4. Không bịa nội dung không có trong các cặp đoạn. Trả lời bằng ngôn ngữ người dùng đang dùng.
 
 ${VOICE_RULES}`;
 }
@@ -843,6 +886,9 @@ export async function* streamChatCompletion(
   });
 
   for await (const chunk of stream) {
+    // Groq gửi số token của cả lần gọi trong gói cuối cùng
+    const usage = (chunk as any).x_groq?.usage;
+    if (usage) recordUsage("answer", config.llmModel, usage);
     const delta = chunk.choices[0]?.delta?.content;
     if (delta) yield delta;
   }

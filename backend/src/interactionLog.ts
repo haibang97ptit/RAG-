@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { config } from "./config.js";
+import type { UsageTotals } from "./llmUsage.js";
 
 /**
  * Nhật ký câu hỏi và phản hồi 👍/👎, mỗi dòng một bản ghi JSON, tách file theo tháng:
@@ -23,6 +24,7 @@ export interface InteractionRecord {
   sources: string[];
   ms: number;
   error?: string;
+  tokens?: UsageTotals; // số token mọi lần gọi AI của câu hỏi này, theo từng bước
 }
 
 export interface FeedbackRecord {

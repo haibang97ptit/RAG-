@@ -430,13 +430,18 @@ function detectMoves(changes: DiffChange[]): DiffChange[] {
 
 // ---------------- Đọc file + kết quả ----------------
 
-async function readFullText(filePath: string): Promise<string> {
+export async function readFullText(filePath: string): Promise<string> {
   const docs = await readFile(filePath, config.dataDir);
   return docs.map((d) => (d.metadata.sheetName ? `${d.metadata.sheetName}\n${d.text}` : d.text)).join("\n\n");
 }
 
 export async function diffDocuments(filePathA: string, filePathB: string): Promise<DiffResult> {
   const [textA, textB] = await Promise.all([readFullText(filePathA), readFullText(filePathB)]);
+  return diffTexts(textA, path.basename(filePathA), textB, path.basename(filePathB));
+}
+
+/** So sánh hai bản chữ đã đọc sẵn (vd file người dùng upload, không nằm trong kho). */
+export function diffTexts(textA: string, fileA: string, textB: string, fileB: string): DiffResult {
   const a = toParagraphs(textA);
   const b = toParagraphs(textB);
   const d = diffBlocks(toBlocks(a), toBlocks(b));
@@ -449,8 +454,8 @@ export async function diffDocuments(filePathA: string, filePathB: string): Promi
     bySection[c.section || PREAMBLE] = (bySection[c.section || PREAMBLE] ?? 0) + 1;
   }
   return {
-    fileA: path.basename(filePathA),
-    fileB: path.basename(filePathB),
+    fileA,
+    fileB,
     paragraphsA: a.length,
     paragraphsB: b.length,
     similarity: d.unchanged / Math.max(1, a.length, b.length),

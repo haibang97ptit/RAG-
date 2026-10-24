@@ -306,7 +306,9 @@ async function planQuery(query: string, history: ChatMessage[], routed = false):
   const routedHint = routed ? `\n\nGhi chú: câu hỏi này đã được xác định là hỏi về HỒ SƠ trong QualZen → "source" là "qualzen".` : "";
   const raw = await callRouter(
     PLANNER_PROMPT,
-    `Hôm nay: ${today}${statusHint}${routedHint}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`
+    `Hôm nay: ${today}${statusHint}${routedHint}\n\nLịch sử hội thoại:\n${historyText || "(chưa có)"}\n\nCâu hỏi mới: "${query}"\n\nJSON:`,
+    undefined,
+    "qualzen_plan"
   );
   const plan = parsePlan(raw, ccnStatuses);
   if (plan === "sop" || plan === null) return null;

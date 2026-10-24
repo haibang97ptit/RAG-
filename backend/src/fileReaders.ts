@@ -216,6 +216,40 @@ export async function readFile(
   return [{ text: contextHeader + text, metadata: { fileName, filePath, category, fileType, ...(ocr ? { ocr } : {}) } }];
 }
 
+export const UPLOAD_EXTENSIONS = [".docx", ".pdf", ".xlsx", ".xls", ".txt", ".md"];
+
+export interface UploadedText {
+  text: string;
+  ocrPages: number;
+  ocrSkippedPages: number; // trang scan không được OCR vì vượt giới hạn
+}
+
+/**
+ * Đọc file người dùng upload (so sánh / tìm đoạn, không index): như readFile nhưng không thêm dòng
+ * "[Tài liệu: ...]" và không ghi gì ra đĩa (kể cả cache OCR). Định dạng không hỗ trợ → throw.
+ */
+export async function readUploadedText(filePath: string, fileName: string, maxOcrPages: number): Promise<UploadedText> {
+  const ext = path.extname(fileName).toLowerCase();
+  switch (ext) {
+    case ".pdf": {
+      const pdf = await readPdf(filePath, { persist: false, maxOcrPages });
+      return { text: pdf.text, ocrPages: pdf.ocrPages, ocrSkippedPages: pdf.ocrSkippedPages ?? 0 };
+    }
+    case ".docx":
+      return { text: await readDOCX(filePath), ocrPages: 0, ocrSkippedPages: 0 };
+    case ".txt":
+    case ".md":
+      return { text: await readText(filePath), ocrPages: 0, ocrSkippedPages: 0 };
+    case ".xlsx":
+    case ".xls": {
+      const sheets = await readXLSX(filePath);
+      return { text: sheets.map((s) => `${s.sheetName}\n${s.content}`).join("\n\n"), ocrPages: 0, ocrSkippedPages: 0 };
+    }
+    default:
+      throw new Error(`Không hỗ trợ định dạng ${ext || "(không có đuôi)"}`);
+  }
+}
+
 export async function walkDirectory(dir: string): Promise<string[]> {
   const files: string[] = [];
   const allowedExts = new Set([".pdf", ".docx", ".txt", ".md", ".xlsx", ".xls"]);

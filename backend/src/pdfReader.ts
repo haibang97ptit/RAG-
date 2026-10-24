@@ -43,6 +43,13 @@ export interface PdfReadResult {
   ocrPages: number; // số trang lấy chữ từ OCR
   confidence: number | null; // trung bình các trang OCR
   fromCache: boolean;
+  ocrSkippedPages?: number; // trang cần OCR nhưng bị bỏ vì vượt maxOcrPages
+}
+
+export interface ReadPdfOptions {
+  // false = không ghi gì ra đĩa (cache OCR, bản chữ OCR, thống kê): dùng cho file người dùng upload
+  persist?: boolean;
+  maxOcrPages?: number; // OCR tối đa bao nhiêu trang (OCR chậm, vài giây mỗi trang)
 }
 
 /** Thống kê OCR trong một lần nạp tài liệu, để in báo cáo cuối lần nạp. */
@@ -223,7 +230,8 @@ export async function reportOcr(): Promise<void> {
   }
 }
 
-export async function readPdf(filePath: string): Promise<PdfReadResult> {
+export async function readPdf(filePath: string, options: ReadPdfOptions = {}): Promise<PdfReadResult> {
+  const persist = options.persist !== false;
   const buffer = await fs.readFile(filePath);
   const layer = await textLayerPages(buffer);
   const plain = (): PdfReadResult => ({
@@ -238,11 +246,13 @@ export async function readPdf(filePath: string): Promise<PdfReadResult> {
 
   const charCount = (t: string) => t.replace(/\s+/g, "").length;
   const imagePages = await pagesWithLargeImages(filePath);
-  const needsOcr = layer
+  const allNeedsOcr = layer
     .map((text, i) => ({ page: i + 1, chars: charCount(text) }))
     .filter(({ page, chars }) => chars < config.ocrMinTextChars || (chars < config.ocrImageTextChars && imagePages.has(page)))
     .map(({ page }) => page);
-  if (needsOcr.length === 0) return plain();
+  const needsOcr = options.maxOcrPages === undefined ? allNeedsOcr : allNeedsOcr.slice(0, options.maxOcrPages);
+  const ocrSkippedPages = allNeedsOcr.length - needsOcr.length;
+  if (needsOcr.length === 0) return { ...plain(), ocrSkippedPages };
 
   // Cache theo nội dung file + cách OCR
   const hash = crypto
@@ -254,6 +264,7 @@ export async function readPdf(filePath: string): Promise<PdfReadResult> {
   let ocrByPage: Record<number, { text: string; confidence: number }> = {};
   let fromCache = false;
   try {
+    if (!persist) throw new Error("không dùng cache");
     ocrByPage = JSON.parse(await fs.readFile(cachePath, "utf-8"));
     fromCache = true;
   } catch {
@@ -265,8 +276,10 @@ export async function readPdf(filePath: string): Promise<PdfReadResult> {
     } finally {
       await fs.rm(workDir, { recursive: true, force: true });
     }
-    await fs.mkdir(cacheDir(), { recursive: true });
-    await fs.writeFile(cachePath, JSON.stringify(ocrByPage), "utf-8");
+    if (persist) {
+      await fs.mkdir(cacheDir(), { recursive: true });
+      await fs.writeFile(cachePath, JSON.stringify(ocrByPage), "utf-8");
+    }
   }
 
   const pages: PdfPage[] = layer.map((text, i) => {
@@ -280,11 +293,11 @@ export async function readPdf(filePath: string): Promise<PdfReadResult> {
   const ocrPages = pages.filter((p) => p.source === "ocr");
   const confidence = ocrPages.length > 0 ? ocrPages.reduce((s, p) => s + (p.confidence ?? 0), 0) / ocrPages.length : null;
 
-  if (ocrPages.length > 0) {
+  if (ocrPages.length > 0 && persist) {
     await exportText(filePath, pages).catch((err) => console.warn(`   Không lưu được bản chữ OCR: ${(err as Error).message}`));
   }
   const minConfidence = ocrPages.length > 0 ? Math.min(...ocrPages.map((p) => p.confidence ?? 0)) : null;
-  ocrStats.push({ filePath, pages: pages.length, ocrPages: ocrPages.length, confidence, minConfidence, fromCache });
+  if (persist) ocrStats.push({ filePath, pages: pages.length, ocrPages: ocrPages.length, confidence, minConfidence, fromCache });
 
-  return { text: joinPages(pages), pages, ocrPages: ocrPages.length, confidence, fromCache };
+  return { text: joinPages(pages), pages, ocrPages: ocrPages.length, confidence, fromCache, ocrSkippedPages };
 }

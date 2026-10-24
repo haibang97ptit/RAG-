@@ -37,6 +37,13 @@ import { answerDataForQualzen, QUALZEN_LIST_HEADING } from "./qualzenAssistant.j
 import { findOverlapContext, type OverlapContext } from "./overlapFinder.js";
 import { INVENTORY_LIST_HEADING, docLookupReplyFor, inventoryReplyFor, type InventoryReply } from "./docInventory.js";
 import { routeQuery, type RoutedQuery } from "./queryRouter.js";
+import multipart from "@fastify/multipart";
+import path from "path";
+import { UPLOAD_EXTENSIONS } from "./fileReaders.js";
+import { getUploads, saveUpload, uploadIdleMinutes, UPLOAD_MAX_BYTES, UPLOAD_MAX_PER_QUERY } from "./uploadStore.js";
+import { expiredUploadText, refersToFile, uploadReplyFor } from "./uploadAssistant.js";
+import { parseDocCodes } from "./docCode.js";
+import { newUsage, runWithUsage } from "./llmUsage.js";
 import { DIFF_LIST_HEADING, diffDocuments, diffSummaryForAi, renderDiffList } from "./docDiff.js";
 import { expandWithGlossary } from "./glossary.js";
 import { logFeedback, logInteraction } from "./interactionLog.js";
@@ -67,6 +74,9 @@ await fastify.register(cors, {
   allowedHeaders: ["Content-Type", "Authorization"],
 });
 
+// Upload file để so sánh / tìm đoạn (POST /upload): mỗi request 1 file
+await fastify.register(multipart, { limits: { fileSize: UPLOAD_MAX_BYTES, files: 1 } });
+
 // ============== AUTH ==============
 
 function bearerMatches(header: string | undefined, expected: string): boolean {
@@ -96,7 +106,13 @@ fastify.addHook("onRequest", async (request, reply) => {
 interface QueryBody {
   query: string;
   history?: ChatMessage[];
+  attachments?: string[]; // uploadId từ POST /upload
 }
+
+const sanitizeAttachments = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === "string" && /^[0-9a-f-]{36}$/i.test(v)).slice(0, UPLOAD_MAX_PER_QUERY)
+    : [];
 
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_UI_SOURCES = 5;
@@ -462,7 +478,13 @@ interface AnswerPlan {
   reply: PreparedReply;
   // Mọi file có đoạn trích đưa vào prompt (không trùng), theo thứ tự ưu tiên
   retrievedSources: UiSource[];
+  // Câu trả lời về file người dùng upload: log chỉ ghi tên file, không ghi câu trả lời (có nội dung file)
+  uploadNames?: string[];
 }
+
+/** Câu trả lời ghi vào log: câu trả lời về file upload thì không ghi nội dung. */
+const loggedAnswer = (plan: AnswerPlan | null, answer: string) =>
+  plan?.uploadNames ? `[trả lời về file tải lên: ${plan.uploadNames.join(", ") || "đã hết hạn"}; không ghi nội dung]` : answer;
 
 type Emit = (event: string, data: unknown) => void;
 
@@ -470,7 +492,12 @@ type Emit = (event: string, data: unknown) => void;
  * Chuẩn bị câu trả lời: hiểu câu hỏi (một lần gọi model) → chọn nhánh → lấy dữ liệu → prompt.
  * Dùng chung cho /query và /query/stream để hai endpoint luôn trả lời giống nhau.
  */
-async function prepareAnswer(query: string, history: ChatMessage[], emit: Emit = () => {}): Promise<AnswerPlan> {
+async function prepareAnswer(
+  query: string,
+  history: ChatMessage[],
+  emit: Emit = () => {},
+  attachments: string[] = []
+): Promise<AnswerPlan> {
   const route = await routeQuery(query, history);
   const intent: Intent = route.task === "chitchat" ? "CHITCHAT" : route.followUp ? "FOLLOW_UP" : "NEW_QUESTION";
   emit("intent", { intent });
@@ -480,6 +507,30 @@ async function prepareAnswer(query: string, history: ChatMessage[], emit: Emit =
     emit("sources", { sources: [] });
     return { intent, route, reply, retrievedSources: [] };
   };
+
+  // Có file đính kèm: so sánh / đối chiếu với kho / hỏi nội dung file. Câu hỏi rõ ràng không liên quan
+  // tới file (đếm SOP, QualZen, chào hỏi, so sánh 2 mã trong kho) thì vẫn đi luồng thường.
+  if (attachments.length > 0) {
+    const unrelated =
+      ["chitchat", "qualzen", "doc_inventory", "doc_lookup"].includes(route.task) ||
+      (route.task === "doc_compare" && parseDocCodes(query).length >= 2);
+    if (refersToFile(query) || !unrelated) {
+      const uploads = getUploads(attachments);
+      if (uploads.length === 0) {
+        return { ...noSources({ prompt: "", maxTokens: 0, list: null, fixedText: expiredUploadText() }), uploadNames: [] };
+      }
+      const upload = await uploadReplyFor(route.followUp ? route.standaloneQuery : query, uploads);
+      fastify.log.info({ files: uploads.map((u) => ({ name: u.fileName, bytes: u.size })), ...upload.log }, "upload_query");
+      emit("sources", { sources: upload.sources });
+      return {
+        intent,
+        route,
+        reply: { prompt: upload.prompt, maxTokens: upload.maxTokens, list: upload.list, fixedText: upload.fixedText },
+        retrievedSources: upload.sources,
+        uploadNames: uploads.map((u) => u.fileName),
+      };
+    }
+  }
 
   if (route.task === "chitchat") {
     return noSources({ prompt: buildChitChatSystemPrompt(), maxTokens: 2048, list: null });
@@ -594,9 +645,58 @@ function userFacingError(err: unknown): string {
   return "Đã có lỗi khi tạo câu trả lời. Vui lòng thử lại; nếu vẫn lỗi, hãy báo quản trị viên.";
 }
 
+/**
+ * Upload 1 file để hỏi kèm (so sánh, tìm đoạn): chỉ giữ phần chữ trong RAM, không index, không lưu.
+ * Trả về uploadId để gửi kèm trong "attachments" của /query/stream.
+ */
+fastify.post("/upload", async (request, reply) => {
+  let file;
+  try {
+    file = await request.file();
+  } catch (err) {
+    return reply.code(400).send({ error: `Không đọc được file gửi lên: ${(err as Error).message}` });
+  }
+  if (!file) return reply.code(400).send({ error: "Thiếu file" });
+
+  const ext = path.extname(file.filename).toLowerCase();
+  if (!UPLOAD_EXTENSIONS.includes(ext)) {
+    file.file.resume(); // bỏ phần dữ liệu còn lại
+    return reply.code(415).send({ error: `Chưa hỗ trợ định dạng ${ext || "này"}. Hỗ trợ: ${UPLOAD_EXTENSIONS.join(", ")}` });
+  }
+
+  let buffer: Buffer;
+  try {
+    buffer = await file.toBuffer();
+  } catch (err) {
+    const tooLarge = (err as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE";
+    return reply
+      .code(tooLarge ? 413 : 400)
+      .send({ error: tooLarge ? `File quá lớn (tối đa ${UPLOAD_MAX_BYTES / 1024 / 1024} MB)` : (err as Error).message });
+  }
+
+  try {
+    const doc = await saveUpload(buffer, file.filename);
+    fastify.log.info({ fileName: doc.fileName, bytes: doc.size, chars: doc.text.length, ocrPages: doc.ocrPages }, "upload_file");
+    if (!doc.text.trim()) {
+      return reply.code(422).send({ error: "Không đọc được chữ trong file (file scan chưa nhận dạng được, hoặc file rỗng)" });
+    }
+    return {
+      uploadId: doc.id,
+      fileName: doc.fileName,
+      chars: doc.text.length,
+      ocrPages: doc.ocrPages,
+      ocrSkippedPages: doc.ocrSkippedPages,
+      expiresAfterIdleMinutes: uploadIdleMinutes,
+    };
+  } catch (err) {
+    fastify.log.warn({ fileName: file.filename, err: (err as Error).message }, "upload_failed");
+    return reply.code(422).send({ error: `Không đọc được file: ${(err as Error).message}` });
+  }
+});
+
 // JSON endpoint (debug)
 fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
-  const { query, history } = request.body ?? ({} as QueryBody);
+  const { query, history, attachments } = request.body ?? ({} as QueryBody);
   const queryError = validateQuery(query);
   if (queryError) {
     return reply.code(400).send({ error: queryError });
@@ -605,29 +705,33 @@ fastify.post<{ Body: QueryBody }>("/query", async (request, reply) => {
   const startedAt = Date.now();
   const answerId = crypto.randomUUID();
   const limitedHistory = sanitizeHistory(history);
-  const plan = await prepareAnswer(query, limitedHistory);
+  const tokens = newUsage();
+  const plan = await runWithUsage(tokens, () => prepareAnswer(query, limitedHistory, undefined, sanitizeAttachments(attachments)));
   const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
 
   let answer = "";
-  for await (const delta of streamPreparedAnswer(plan.reply, messages)) {
-    answer += delta;
-  }
+  await runWithUsage(tokens, async () => {
+    for await (const delta of streamPreparedAnswer(plan.reply, messages)) {
+      answer += delta;
+    }
+  });
   void logInteraction({
     id: answerId,
     query,
     historyTurns: limitedHistory.length,
     intent: plan.intent,
     route: plan.route,
-    answer,
+    answer: loggedAnswer(plan, answer),
     sources: plan.retrievedSources.map((s) => s.fileName),
     ms: Date.now() - startedAt,
+    ...(tokens.calls > 0 ? { tokens } : {}),
   });
   return { answerId, intent: plan.intent, answer, sources: plan.retrievedSources };
 });
 
 // SSE streaming endpoint
 fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
-  const { query, history } = request.body ?? ({} as QueryBody);
+  const { query, history, attachments } = request.body ?? ({} as QueryBody);
   const queryError = validateQuery(query);
   if (queryError) {
     return reply.code(400).send({ error: queryError });
@@ -662,34 +766,45 @@ fastify.post<{ Body: QueryBody }>("/query/stream", async (request, reply) => {
   let shownSources: UiSource[] = [];
   let error: string | undefined;
 
+  // Đếm token mọi lần gọi AI của câu hỏi này (hiểu câu hỏi, chấm đoạn, trả lời...), ghi vào nhật ký
+  const tokens = newUsage();
+
   try {
-    plan = await prepareAnswer(query, limitedHistory, send);
+    await runWithUsage(tokens, async () => {
+      const prepared = await prepareAnswer(query, limitedHistory, send, sanitizeAttachments(attachments));
+      plan = prepared;
 
-    const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
-    for await (const delta of streamPreparedAnswer(plan.reply, messages)) {
-      answer += delta;
-      send("chunk", { delta });
-    }
+      const messages: ChatMessage[] = [...limitedHistory, { role: "user", content: query }];
+      for await (const delta of streamPreparedAnswer(prepared.reply, messages)) {
+        answer += delta;
+        send("chunk", { delta });
+      }
 
-    // Nguồn hiển thị: chỉ các file câu trả lời thật sự dùng; không có gì nếu "không tìm thấy"
-    shownSources = selectDisplayedSources(answer, plan.retrievedSources, MAX_UI_SOURCES);
-    send("done", { answerId, intent: plan.intent, sources: shownSources });
+      // Nguồn hiển thị: chỉ các file câu trả lời thật sự dùng; không có gì nếu "không tìm thấy"
+      shownSources = selectDisplayedSources(answer, prepared.retrievedSources, MAX_UI_SOURCES);
+      // uploadExpired: file đính kèm đã bị xoá khỏi RAM → app bỏ thẻ file, nhắc tải lại
+      const uploadExpired = prepared.uploadNames?.length === 0;
+      send("done", { answerId, intent: prepared.intent, sources: shownSources, ...(uploadExpired ? { uploadExpired } : {}) });
+    });
   } catch (err) {
     error = (err as Error).message;
     fastify.log.error(err);
     send("error", { message: userFacingError(err) });
   } finally {
     reply.raw.end();
+    // plan được gán bên trong runWithUsage: TypeScript không theo dõi được qua hàm lồng
+    const finalPlan = plan as AnswerPlan | null;
     void logInteraction({
       id: answerId,
       query,
       historyTurns: limitedHistory.length,
-      intent: plan?.intent ?? "",
-      route: plan?.route ?? null,
-      answer,
+      intent: finalPlan?.intent ?? "",
+      route: finalPlan?.route ?? null,
+      answer: loggedAnswer(finalPlan, answer),
       sources: shownSources.map((s) => s.fileName),
       ms: Date.now() - startedAt,
       ...(error ? { error } : {}),
+      ...(tokens.calls > 0 ? { tokens } : {}),
     });
   }
 });

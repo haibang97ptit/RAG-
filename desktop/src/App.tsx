@@ -18,7 +18,21 @@ interface Message {
   answerId?: string; // backend cấp, dùng khi gửi 👍/👎
   rating?: Rating;
   commentSent?: boolean;
+  attachments?: string[]; // tên file gửi kèm câu hỏi (chỉ để hiển thị)
 }
+
+// File tải lên để hỏi kèm (so sánh, tìm đoạn). Server chỉ giữ trong RAM, hết hạn sau một thời gian không dùng.
+interface Attachment {
+  localId: string;
+  fileName: string;
+  status: "uploading" | "ready" | "error";
+  uploadId?: string;
+  error?: string;
+}
+
+const UPLOAD_EXTENSIONS = [".docx", ".pdf", ".xlsx", ".xls", ".txt", ".md"];
+const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENTS = 2;
 
 const BACKEND_URL =
   (import.meta as any).env?.VITE_BACKEND_URL || "http://localhost:8000";
@@ -57,6 +71,22 @@ const authHeaders = (): Record<string, string> => ({
   "Content-Type": "application/json",
   ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
 });
+
+/** Upload 1 file → uploadId. Lỗi (sai định dạng, quá lớn, không đọc được chữ) → throw kèm thông báo của server. */
+async function uploadFile(file: File): Promise<string> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await fetch(`${BACKEND_URL}/upload`, {
+    method: "POST",
+    // Không đặt Content-Type: trình duyệt tự thêm boundary của multipart
+    headers: API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {},
+    body: form,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 404) throw new Error("Server chưa có tính năng tải file (cần cập nhật server)");
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload.uploadId as string;
+}
 
 /** Gửi 👍/👎 (kèm góp ý nếu có). Lỗi mạng thì bỏ qua: phản hồi không quan trọng bằng việc hỏi đáp. */
 async function sendFeedback(answerId: string, rating: Rating, comment?: string) {
@@ -150,6 +180,42 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const uploading = attachments.some((a) => a.status === "uploading");
+
+  function patchAttachment(localId: string, patch: Partial<Attachment>) {
+    setAttachments((prev) => prev.map((a) => (a.localId === localId ? { ...a, ...patch } : a)));
+  }
+
+  function addFiles(files: File[]) {
+    const room = MAX_ATTACHMENTS - attachments.length;
+    for (const file of files.slice(0, Math.max(0, room))) {
+      const localId = `${Date.now()}-${Math.random()}`;
+      const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+      const error = !UPLOAD_EXTENSIONS.includes(ext)
+        ? `Chưa hỗ trợ ${ext}`
+        : file.size > UPLOAD_MAX_BYTES
+          ? "Quá 20 MB"
+          : undefined;
+      setAttachments((prev) => [...prev, { localId, fileName: file.name, status: error ? "error" : "uploading", error }]);
+      if (error) continue;
+      uploadFile(file)
+        .then((uploadId) => patchAttachment(localId, { status: "ready", uploadId }))
+        .catch((err) => patchAttachment(localId, { status: "error", error: (err as Error).message }));
+    }
+  }
+
+  function removeAttachment(localId: string) {
+    setAttachments((prev) => prev.filter((a) => a.localId !== localId));
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(false);
+    addFiles(Array.from(e.dataTransfer.files));
+  }
 
   useEffect(() => {
     saveSession(messages);
@@ -161,9 +227,15 @@ export default function App() {
 
   async function send() {
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text || loading || uploading) return;
 
-    const userMsg: Message = { role: "user", content: text };
+    // File vẫn giữ sau khi gửi: các câu hỏi tiếp theo cũng hỏi kèm file đó, tới khi người dùng bỏ thẻ file
+    const ready = attachments.filter((a) => a.status === "ready" && a.uploadId);
+    const userMsg: Message = {
+      role: "user",
+      content: text,
+      ...(ready.length > 0 ? { attachments: ready.map((a) => a.fileName) } : {}),
+    };
     const history = messages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -183,7 +255,11 @@ export default function App() {
       const response = await fetch(`${BACKEND_URL}/query/stream`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ query: text, history }),
+        body: JSON.stringify({
+          query: text,
+          history,
+          ...(ready.length > 0 ? { attachments: ready.map((a) => a.uploadId) } : {}),
+        }),
         signal: abortRef.current.signal,
       });
 
@@ -240,6 +316,8 @@ export default function App() {
                 }
                 return next;
               });
+              // Server đã xoá file (hết hạn / khởi động lại): bỏ thẻ file, người dùng tải lại
+              if (payload.uploadExpired) setAttachments([]);
             } else if (event === "chunk") {
               setMessages((prev) => {
                 const next = [...prev];
@@ -301,6 +379,7 @@ export default function App() {
 
   function clearChat() {
     setMessages([]);
+    setAttachments([]);
     localStorage.removeItem(SESSION_STORAGE_KEY);
   }
 
@@ -312,7 +391,18 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div
+      className={`app${dragging ? " dragging" : ""}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!dragging) setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragging(false);
+      }}
+      onDrop={onDrop}
+    >
+      {dragging && <div className="drop-hint">Thả file vào đây để hỏi kèm (Word, PDF, Excel, txt)</div>}
       <header className="header">
         <div className="header-title">
           <span className="logo">●</span>
@@ -357,6 +447,13 @@ export default function App() {
                 m.content
               )}
             </div>
+            {m.role === "user" && m.attachments && m.attachments.length > 0 && (
+              <div className="msg-files">
+                {m.attachments.map((name, j) => (
+                  <span key={j} className="file-chip">📄 {name}</span>
+                ))}
+              </div>
+            )}
             {m.role === "assistant" && m.sources && m.sources.length > 0 && (
               <div className="sources">
                 <div className="sources-title">Nguồn tham khảo:</div>
@@ -384,21 +481,58 @@ export default function App() {
         ))}
       </div>
 
+      {attachments.length > 0 && (
+        <div className="attachments">
+          {attachments.map((a) => (
+            <span key={a.localId} className={`file-chip file-${a.status}`} title={a.error || a.fileName}>
+              {a.status === "uploading" ? "⏳" : a.status === "error" ? "⚠️" : "📄"} {a.fileName}
+              {a.error && <span className="file-error"> - {a.error}</span>}
+              <button className="file-remove" onClick={() => removeAttachment(a.localId)} title="Bỏ file">
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="composer">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={UPLOAD_EXTENSIONS.join(",")}
+          multiple
+          hidden
+          onChange={(e) => {
+            addFiles(Array.from(e.target.files ?? []));
+            e.target.value = ""; // chọn lại cùng file vẫn nhận
+          }}
+        />
+        <button
+          className="btn-attach"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={loading || attachments.length >= MAX_ATTACHMENTS}
+          title="Tải file lên để so sánh, tìm đoạn (tối đa 2 file, 20 MB)"
+        >
+          📎
+        </button>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Nhập câu hỏi... (Enter để gửi, Shift+Enter xuống dòng)"
+          placeholder={
+            attachments.length > 0
+              ? 'Hỏi về file... vd "so sánh với SOP hiện hành", "chỗ nào nói về..."'
+              : "Nhập câu hỏi... (Enter để gửi, Shift+Enter xuống dòng)"
+          }
           rows={2}
           disabled={loading}
         />
         <button
           className="btn-send"
           onClick={send}
-          disabled={loading || !input.trim()}
+          disabled={loading || uploading || !input.trim()}
         >
-          {loading ? "Đang gửi..." : "Gửi"}
+          {loading ? "Đang gửi..." : uploading ? "Đang tải file..." : "Gửi"}
         </button>
       </div>
     </div>
