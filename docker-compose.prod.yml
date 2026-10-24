@@ -59,6 +59,10 @@ services:
       QUALZEN_DB_ENCRYPT: ${QUALZEN_DB_ENCRYPT:-false}
       # Dữ liệu QualZen tối đa đưa vào prompt (ký tự). Danh sách dài hơn do server tự in.
       QUALZEN_PROMPT_BUDGET_CHARS: ${QUALZEN_PROMPT_BUDGET_CHARS:-12000}
+      # Docuzen (quản lý tài liệu, cùng database QualZen): đếm / liệt kê / tra mã / phiên bản / ngày hiệu lực
+      # theo danh mục chính thức (bản đang hiệu lực) thay cho đoán từ tên file. Cần QUALZEN_DB_*.
+      DOCUZEN_ENABLED: ${DOCUZEN_ENABLED:-false}
+      DOCUZEN_FILE_BASE_URL: ${DOCUZEN_FILE_BASE_URL:-http://10.1.11.35/fs/}
       # OCR cho PDF scan (xem backend/.env.example)
       OCR_ENABLED: ${OCR_ENABLED:-true}
       OCR_MIN_TEXT_CHARS: ${OCR_MIN_TEXT_CHARS:-200}

@@ -30,6 +30,23 @@ export async function getIndexedFiles(): Promise<IndexedFile[]> {
   return files;
 }
 
+/**
+ * Danh mục để ĐẾM / LIỆT KÊ / TRA MÃ: danh mục chính thức của Docuzen nếu bật (DOCUZEN_ENABLED), không thì
+ * các file đã index. Docuzen lỗi → quay về file đã index. Tìm theo nội dung vẫn dùng getIndexedFiles
+ * (đường dẫn phải khớp đoạn trích trong Qdrant).
+ */
+export async function getCatalogFiles(): Promise<IndexedFile[]> {
+  if (config.docuzenEnabled) {
+    try {
+      const { getDocuzenFiles } = await import("./docuzenCatalog.js");
+      return await getDocuzenFiles();
+    } catch (err) {
+      console.warn("Không đọc được danh mục Docuzen, dùng danh mục file đã index:", (err as Error).message);
+    }
+  }
+  return getIndexedFiles();
+}
+
 // Tách thành cụm chữ / cụm số: "FRM.QA.SOP-GEN.0005-F11-03" → frm, qa, sop, gen, 0005, f, 11, 03
 function tokenize(text: string): string[] {
   return text.normalize("NFC").toLowerCase().match(/\p{L}+|\p{N}+/gu) || [];

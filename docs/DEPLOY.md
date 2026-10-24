@@ -219,6 +219,49 @@ curl -X DELETE http://localhost:6333/collections/sop_documents
 
 Quay lại collection cũ: đổi `COLLECTION_NAME` về giá trị cũ rồi `$DC up -d`.
 
+## Lấy tài liệu từ Docuzen (danh mục + nội dung)
+
+Docuzen (phần quản lý tài liệu, cùng database QualZen) là nguồn chính: chỉ lấy bản đang hiệu lực, tự cập nhật
+khi có phiên bản mới, tự gỡ tài liệu bị thu hồi. Thư mục SMB chỉ còn giữ những file KHÔNG có trên Docuzen
+(`ingest:incremental` tự bỏ qua file đã có trên Docuzen khi `DOCUZEN_ENABLED=true`).
+
+- `ingest:docuzen` tải file của bản hiện hành qua file server (`DOCUZEN_FILE_BASE_URL`, mặc định
+  `http://10.1.11.35/fs/`), đọc, index rồi xoá file tạm: không lưu bản sao file trên server.
+- Hai script dùng chung collection nhưng không đụng dữ liệu của nhau (tài liệu Docuzen có đường dẫn `docuzen://<DocumentID>`).
+
+```bash
+cd /opt/sop-ai
+DC="docker compose -f docker-compose.prod.yml --env-file .env.prod"
+
+# 1. Bật danh mục Docuzen: thêm DOCUZEN_ENABLED=true vào .env.prod rồi
+$DC up -d
+
+# 2. Chạy thử trên collection mới (bản đang chạy không bị ảnh hưởng)
+$DC exec -e COLLECTION_NAME=sop_docuzen backend npm run ingest:docuzen -- --dry-run     # sẽ index bao nhiêu
+$DC exec -e COLLECTION_NAME=sop_docuzen backend npm run ingest:docuzen -- --limit 100   # đo thời gian, số đoạn / tài liệu
+
+# 3. Index toàn bộ (chạy trong tmux/screen: lần đầu có thể mất vài giờ)
+$DC exec -e COLLECTION_NAME=sop_docuzen backend npm run ingest:docuzen
+
+# 4. Thêm các file SMB không có trên Docuzen vào cùng collection
+$DC exec -e COLLECTION_NAME=sop_docuzen backend npm run ingest:incremental
+
+# 5. Kiểm tra số đoạn, log không còn ❌, dung lượng ổ đĩa
+curl -s http://localhost:6333/collections/sop_docuzen | grep -o '"points_count":[0-9]*'
+
+# 6. Chuyển: thêm COLLECTION_NAME=sop_docuzen vào .env.prod rồi
+$DC up -d
+```
+
+Cronjob (crontab -e): cập nhật từ Docuzen mỗi đêm, giữ cronjob SMB như cũ.
+```cron
+0 1 * * * cd /opt/sop-ai && docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T backend npm run ingest:docuzen >> /var/log/sop-docuzen-ingest.log 2>&1
+```
+
+Chốt an toàn: nếu số tài liệu cần gỡ lớn bất thường (> 30%, vd database trả thiếu dữ liệu) thì script dừng, không
+gỡ gì; chạy lại với `--force` nếu đúng là muốn gỡ. Tài liệu tải / đọc lỗi được thử lại ở lần chạy sau.
+Quay lại: đổi `COLLECTION_NAME` về collection cũ rồi `$DC up -d`.
+
 ## Bật tìm kiếm theo từ khóa + tên mục (cần index lại một lần)
 
 Từ bản có `sparseVector.ts`, mỗi đoạn được lưu kèm tên tài liệu, tên mục và vector từ khóa

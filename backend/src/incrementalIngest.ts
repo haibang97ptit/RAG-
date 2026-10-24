@@ -14,6 +14,7 @@ import {
 import { readFile, walkDirectory } from "./fileReaders.js";
 import { buildPointsForDocument } from "./chunkPoints.js";
 import { reportOcr } from "./pdfReader.js";
+import { DOCUZEN_PATH_PREFIX, docuzenNumberKeys, getDocuzenFiles, isOnDocuzen } from "./docuzenCatalog.js";
 
 const BATCH_SIZE = 32;
 const MANIFEST_PATH = config.manifestPath;
@@ -69,6 +70,22 @@ async function hashFile(filePath: string): Promise<{ hash: string; mtime: number
 }
 
 /**
+ * File SMB đã có trên Docuzen (khi DOCUZEN_ENABLED): do ingest:docuzen index, thư mục SMB chỉ còn giữ file
+ * KHÔNG có trên Docuzen. Không đọc được Docuzen → không bỏ file nào.
+ */
+async function docuzenDuplicates(files: string[]): Promise<Set<string>> {
+  if (!config.docuzenEnabled) return new Set();
+  let keys: Set<string>;
+  try {
+    keys = docuzenNumberKeys(await getDocuzenFiles());
+  } catch (err) {
+    console.warn(`   ⚠️  Không đọc được danh mục Docuzen, giữ mọi file SMB: ${(err as Error).message}`);
+    return new Set();
+  }
+  return new Set(files.filter((f) => isOnDocuzen(path.basename(f), keys)));
+}
+
+/**
  * Index (hoặc index lại) 1 file. Parse + embed xong hết rồi mới xóa chunks cũ và upsert,
  * nên file lỗi parse/embed không làm mất dữ liệu đang có.
  */
@@ -117,17 +134,24 @@ async function incrementalIngest() {
   console.log(`   Previous: ${previousCount} files tracked`);
 
   console.log("\n4️⃣  Scan filesystem...");
-  const currentFiles = await walkDirectory(config.dataDir);
-  const currentPaths = new Set(currentFiles);
-  console.log(`   Current:  ${currentFiles.length} files on disk`);
+  const filesOnDisk = await walkDirectory(config.dataDir);
+  console.log(`   Current:  ${filesOnDisk.length} files on disk`);
 
-  // File đang có trong vector DB (kể cả file manifest không biết, vd manifest bị mất)
-  const indexedPaths = await listIndexedFilePaths();
-  console.log(`   Indexed:  ${indexedPaths.size} files in vector DB`);
+  // Tài liệu đã có trên Docuzen thì do ingest:docuzen index (đúng bản hiện hành): thư mục SMB chỉ còn giữ
+  // những file KHÔNG có trên Docuzen. File trùng đã index trước đây sẽ được gỡ để không có 2 bản.
+  const onDocuzen = await docuzenDuplicates(filesOnDisk);
+  const currentFiles = filesOnDisk.filter((f) => !onDocuzen.has(f));
+  const currentPaths = new Set(currentFiles);
+  if (onDocuzen.size > 0) console.log(`   Bỏ qua:   ${onDocuzen.size} files đã có trên Docuzen`);
+
+  // File đang có trong vector DB (kể cả file manifest không biết, vd manifest bị mất).
+  // Bỏ tài liệu Docuzen (docuzen://...): do ingest:docuzen quản lý, script này không đụng tới.
+  const indexedPaths = new Set([...(await listIndexedFilePaths())].filter((p) => !p.startsWith(DOCUZEN_PATH_PREFIX)));
+  console.log(`   Indexed:  ${indexedPaths.size} files in vector DB (không tính tài liệu Docuzen)`);
 
   const trackedPaths = new Set([...Object.keys(manifest.files), ...indexedPaths]);
 
-  if (currentFiles.length === 0 && trackedPaths.size > 0 && !force) {
+  if (filesOnDisk.length === 0 && trackedPaths.size > 0 && !force) {
     throw new Error(
       `Không thấy file nào trong ${config.dataDir} nhưng đang có ${trackedPaths.size} files đã index. ` +
         `Có thể thư mục data chưa mount/sync. Không xóa gì. Chạy lại với --force nếu thật sự muốn xóa hết.`
@@ -152,16 +176,19 @@ async function incrementalIngest() {
     }
   }
 
-  // Files bị xóa: có trong manifest hoặc vector DB nhưng ko còn trên disk
-  const toDelete = [...trackedPaths].filter((p) => !currentPaths.has(p));
+  // Files bị xóa: có trong manifest hoặc vector DB nhưng ko còn trên disk.
+  // File trùng Docuzen gỡ riêng: không tính vào chốt an toàn (lần đầu bật Docuzen có thể gỡ phần lớn file SMB).
+  const duplicates = [...trackedPaths].filter((p) => onDocuzen.has(p));
+  const toDelete = [...trackedPaths].filter((p) => !currentPaths.has(p) && !onDocuzen.has(p));
 
   const addCount = toIndex.filter((f) => f.isNew).length;
   console.log(`   ➕ Thêm mới:   ${addCount}`);
   console.log(`   🔄 Cập nhật:  ${toIndex.length - addCount}`);
   console.log(`   ❌ Xóa:        ${toDelete.length}`);
+  console.log(`   🔁 Gỡ (đã có trên Docuzen): ${duplicates.length}`);
   console.log(`   ✓  Giữ nguyên: ${unchanged.length}`);
 
-  if (toIndex.length + toDelete.length === 0) {
+  if (toIndex.length + toDelete.length + duplicates.length === 0) {
     console.log("\n✅ Không có thay đổi. Thoát.");
     return;
   }
@@ -180,10 +207,10 @@ async function incrementalIngest() {
 
   let failed = 0;
 
-  // 6. Xử lý DELETE
-  if (toDelete.length > 0) {
-    console.log(`\n6️⃣  Xóa ${toDelete.length} files khỏi vector DB...`);
-    for (const filePath of toDelete) {
+  // 6. Xử lý DELETE (file không còn trên disk + file trùng Docuzen)
+  if (toDelete.length + duplicates.length > 0) {
+    console.log(`\n6️⃣  Xóa ${toDelete.length + duplicates.length} files khỏi vector DB...`);
+    for (const filePath of [...toDelete, ...duplicates]) {
       try {
         await deleteByFilePath(filePath);
         delete manifest.files[filePath];
@@ -244,7 +271,10 @@ async function incrementalIngest() {
   await reportOcr();
 }
 
-incrementalIngest().catch((err) => {
-  console.error("❌ Incremental ingest thất bại:", (err as Error).message || err);
-  process.exit(1);
-});
+incrementalIngest()
+  // Kết nối database Docuzen (nếu có) giữ tiến trình sống: thoát hẳn khi xong
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("❌ Incremental ingest thất bại:", (err as Error).message || err);
+    process.exit(1);
+  });

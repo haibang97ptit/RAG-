@@ -14,7 +14,8 @@ import { connectQualzen, qualzenSettingsFromEnv } from "./qualzenDb.js";
  *   - FilePath lưu dạng gì, tải được qua http://10.1.11.35/fs/{FilePath} không, có phải đăng nhập không.
  *
  * Bảng chính (theo code SOP IT đang chạy): DMS.AizantIT_DocumentMaster, AizantIT_DocVersion,
- * AizantIT_DocVersionTitle, AizantIT_DocumentLocation (key DocVID).
+ * AizantIT_DocVersionTitle, AizantIT_DocumentLocation. Tên cột thật (lần chạy đầu): DocumentMaster.DocumentNumber,
+ * DocVersion.VersionID / VersionNumber / DocTitleID, DocVersionTitle.DocTitleID, DocumentLocation.DocVID = DocVersion.VersionID.
  *
  * Báo cáo CÓ dữ liệu thật (mã, tên tài liệu, đường dẫn) nên nằm trong .cache/ (gitignored).
  * Chạy với --no-samples để bỏ dòng mẫu và đường dẫn cụ thể (vẫn giữ thống kê).
@@ -68,6 +69,7 @@ function fileUrlOf(filePath: string): string {
       return encodeURI(raw); // có "%" lẻ không giải mã được
     }
   }
+  
   const relative = raw.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^fs\//i, "");
   return FILE_BASE_URL.replace(/\/?$/, "/") + relative.split("/").map(encodeURIComponent).join("/");
 }
@@ -227,12 +229,50 @@ async function explore() {
   out.push(`## 4. Phân bố giá trị`, "");
   await section("Số tài liệu theo DeptID × DocumentTypeID", `SELECT DeptID, DocumentTypeID, COUNT(*) AS SoTaiLieu FROM ${MASTER} GROUP BY DeptID, DocumentTypeID ORDER BY DeptID, DocumentTypeID`);
   await section("Số phiên bản theo DocumentStatus", `SELECT DocumentStatus, COUNT(*) AS SoPhienBan FROM ${VERSION} GROUP BY DocumentStatus ORDER BY SoPhienBan DESC`);
+  // Các cột có thể cho biết phiên bản nào đang hiệu lực
+  for (const column of ["Status", "EffectiveStatus", "Suspend", "RequestTypeID", "RevisionStatus", "FATStatus"]) {
+    await section(`Số phiên bản theo ${column}`, `SELECT ${quote(column)} AS GiaTri, COUNT(*) AS SoPhienBan FROM ${VERSION} GROUP BY ${quote(column)} ORDER BY SoPhienBan DESC`);
+  }
   await section(
-    "Trạng thái của phiên bản MỚI NHẤT mỗi tài liệu (theo DocVID lớn nhất)",
-    `SELECT v.DocumentStatus, COUNT(*) AS SoTaiLieu
+    "Kết hợp DocumentStatus × Status × EffectiveStatus × Suspend (kèm có / không có ngày hiệu lực)",
+    `SELECT DocumentStatus, Status, EffectiveStatus, Suspend,
+            SUM(CASE WHEN EffectiveDate IS NULL THEN 0 ELSE 1 END) AS CoNgayHieuLuc,
+            SUM(CASE WHEN ExpirationDate IS NOT NULL AND ExpirationDate < GETDATE() THEN 1 ELSE 0 END) AS DaQuaNgayHetHan,
+            COUNT(*) AS SoPhienBan
+     FROM ${VERSION}
+     GROUP BY DocumentStatus, Status, EffectiveStatus, Suspend
+     ORDER BY SoPhienBan DESC`
+  );
+  await section(
+    "Trạng thái của phiên bản MỚI NHẤT mỗi tài liệu (VersionID lớn nhất)",
+    `SELECT v.DocumentStatus, v.Status, v.EffectiveStatus, COUNT(*) AS SoTaiLieu
      FROM ${VERSION} v
-     JOIN (SELECT DocumentID, MAX(DocVID) AS DocVID FROM ${VERSION} GROUP BY DocumentID) last ON last.DocVID = v.DocVID
-     GROUP BY v.DocumentStatus ORDER BY SoTaiLieu DESC`
+     JOIN (SELECT DocumentID, MAX(VersionID) AS VersionID FROM ${VERSION} GROUP BY DocumentID) last ON last.VersionID = v.VersionID
+     GROUP BY v.DocumentStatus, v.Status, v.EffectiveStatus ORDER BY SoTaiLieu DESC`
+  );
+  await section(
+    "Ví dụ: mọi phiên bản của 3 tài liệu có nhiều phiên bản nhất (để thấy bản cũ / bản hiện hành khác nhau ở cột nào)",
+    `SELECT v.DocumentID, v.VersionID, v.VersionNumber, v.Status, v.DocumentStatus, v.EffectiveStatus, v.Suspend, v.RequestTypeID,
+            v.EffectiveDate, v.ExpirationDate, v.ActivatedDate, v.LastModifiedDate
+     FROM ${VERSION} v
+     WHERE v.DocumentID IN (SELECT TOP 3 DocumentID FROM ${VERSION} GROUP BY DocumentID ORDER BY COUNT(*) DESC)
+     ORDER BY v.DocumentID, v.VersionNumber`
+  );
+  await section(
+    "Biểu mẫu / phụ lục trỏ về tài liệu mẹ (LinkedDocumentID) - loại của tài liệu mẹ",
+    `SELECT c.DocumentTypeID AS LoaiCon, p.DocumentTypeID AS LoaiMe, COUNT(*) AS SoTaiLieu
+     FROM ${MASTER} c LEFT JOIN ${MASTER} p ON p.DocumentID = c.LinkedDocumentID
+     WHERE c.DocumentTypeID IN (1, 2, 3)
+     GROUP BY c.DocumentTypeID, p.DocumentTypeID ORDER BY LoaiCon, SoTaiLieu DESC`
+  );
+  await section(
+    "Phân quyền xem (PrivacyDepartment): số phiên bản theo danh sách phòng",
+    `SELECT TOP 15 CASE WHEN LTRIM(RTRIM(PrivacyDepartment)) = '' THEN '(trống)' ELSE PrivacyDepartment END AS PhongDuocXem, COUNT(*) AS SoPhienBan
+     FROM ${VERSION} GROUP BY PrivacyDepartment ORDER BY SoPhienBan DESC`
+  );
+  await section(
+    "Tài liệu isPublic",
+    `SELECT isPublic, COUNT(*) AS SoTaiLieu FROM ${MASTER} GROUP BY isPublic ORDER BY SoTaiLieu DESC`
   );
   await section(
     "Số phiên bản mỗi tài liệu",
@@ -246,9 +286,13 @@ async function explore() {
     "Phiên bản thiếu tiêu đề / thiếu đường dẫn file",
     `SELECT
        (SELECT COUNT(*) FROM ${VERSION}) AS TongPhienBan,
-       (SELECT COUNT(*) FROM ${VERSION} v WHERE NOT EXISTS (SELECT 1 FROM ${TITLE} t WHERE t.DocVID = v.DocVID)) AS KhongCoTieuDe,
-       (SELECT COUNT(*) FROM ${VERSION} v WHERE NOT EXISTS (SELECT 1 FROM ${LOCATION} l WHERE l.DocVID = v.DocVID)) AS KhongCoFile,
+       (SELECT COUNT(*) FROM ${VERSION} v WHERE NOT EXISTS (SELECT 1 FROM ${TITLE} t WHERE t.DocTitleID = v.DocTitleID)) AS KhongCoTieuDe,
+       (SELECT COUNT(*) FROM ${VERSION} v WHERE NOT EXISTS (SELECT 1 FROM ${LOCATION} l WHERE l.DocVID = v.VersionID)) AS KhongCoFile,
        (SELECT COUNT(*) FROM (SELECT DocVID FROM ${LOCATION} GROUP BY DocVID HAVING COUNT(*) > 1) x) AS PhienBanCoNhieuFile`
+  );
+  await section(
+    "File của mỗi phiên bản: theo FileType × isTemp × RoleID",
+    `SELECT FileType, isTemp, RoleID, COUNT(*) AS SoFile FROM ${LOCATION} GROUP BY FileType, isTemp, RoleID ORDER BY SoFile DESC`
   );
 
   // ---- 5. Dòng mẫu (nối 4 bảng như code SOP IT, nhưng mọi phòng ban / loại) ----
@@ -257,13 +301,15 @@ async function explore() {
     out.push(`## 5. Dòng mẫu: ${SAMPLE_ROWS} phiên bản sửa gần nhất (mọi phòng ban, mọi loại)`, "");
     await section(
       "Nối 4 bảng",
-      `SELECT TOP ${SAMPLE_ROWS} m.DocumentID, m.DocumentNo, m.DeptID, m.DocumentTypeID, v.DocVID, v.VersionNo, v.DocumentStatus,
-              v.EffectiveDate, v.ExpirationDate, v.LastmodifiedDate, t.Title, l.FilePath
+      `SELECT TOP ${SAMPLE_ROWS * 2} m.DocumentID, m.DocumentNumber, m.DeptID, m.DocumentTypeID, m.LinkedDocumentID, v.VersionID,
+              v.VersionNumber, v.Status, v.DocumentStatus, v.EffectiveStatus, v.EffectiveDate, v.ExpirationDate, t.Title,
+              l.FileType, l.isTemp, l.FilePath
        FROM ${MASTER} m
        JOIN ${VERSION} v ON v.DocumentID = m.DocumentID
-       LEFT JOIN ${TITLE} t ON t.DocVID = v.DocVID
-       LEFT JOIN ${LOCATION} l ON l.DocVID = v.DocVID
-       ORDER BY v.LastmodifiedDate DESC`
+       LEFT JOIN ${TITLE} t ON t.DocTitleID = v.DocTitleID
+       LEFT JOIN ${LOCATION} l ON l.DocVID = v.VersionID
+       WHERE v.EffectiveDate IS NOT NULL
+       ORDER BY v.EffectiveDate DESC`
     );
     for (const name of CORE_TABLES) {
       await section(`${name}: ${SAMPLE_ROWS} dòng (mọi cột)`, `SELECT TOP ${SAMPLE_ROWS} * FROM ${T(name)} ORDER BY 1 DESC`);
@@ -301,7 +347,8 @@ async function explore() {
 
     // Thử tải vài file mới nhất (mỗi đuôi một file nếu được)
     const latest = await query(
-      `SELECT TOP 200 l.FilePath FROM ${LOCATION} l JOIN ${VERSION} v ON v.DocVID = l.DocVID WHERE l.FilePath IS NOT NULL ORDER BY v.LastmodifiedDate DESC`
+      `SELECT TOP 200 l.FilePath FROM ${LOCATION} l JOIN ${VERSION} v ON v.VersionID = l.DocVID
+       WHERE l.FilePath IS NOT NULL AND v.EffectiveDate IS NOT NULL ORDER BY v.EffectiveDate DESC`
     );
     const picked: string[] = [];
     const seenExt = new Set<string>();

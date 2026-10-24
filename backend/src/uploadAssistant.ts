@@ -94,7 +94,7 @@ function targetCode(query: string, doc: UploadedDoc): DocCode | null {
   if (fromQuery) return fromQuery;
   // Chỉ tin mã trong tên file khi có phòng ban ("FRM-QA-SOP-GEN-0005..."), không phải số bất kỳ ("DIFF-9001")
   if (doc.code?.department) {
-    return { department: doc.code.department, series: doc.code.series, number: doc.code.number, sub: doc.code.sub, span: [0, 0] };
+    return { department: doc.code.department, series: doc.code.series, number: doc.code.number, sub: doc.code.sub, typeCode: null, span: [0, 0] };
   }
   return parseDocCodes(doc.text.slice(0, 3000))[0] ?? null;
 }

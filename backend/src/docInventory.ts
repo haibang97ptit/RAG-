@@ -1,4 +1,4 @@
-import { getIndexedFiles, isMainDocument, stripExtension } from "./fileCatalog.js";
+import { getCatalogFiles, isMainDocument, stripExtension } from "./fileCatalog.js";
 import type { IndexedFile } from "./qdrantService.js";
 import {
   DEPARTMENT_CODES,
@@ -9,18 +9,21 @@ import {
   sopLabel,
   textWithoutCodes,
   type DocCode,
+  type FileCode,
 } from "./docCode.js";
 
 /**
  * Câu hỏi về KHO tài liệu: "phòng QA có bao nhiêu SOP", "liệt kê các biểu mẫu của IT",
  * "sop qa 13 có mấy biểu mẫu", "F02 thuộc sop nào".
  *
- * Đoạn trích tìm bằng vector không trả lời được (chỉ có ~10 đoạn), nên đếm thẳng trên danh mục
- * file đã index. Danh sách do server tự in; LLM chỉ nhận số liệu để viết phần mở đầu.
+ * Đoạn trích tìm bằng vector không trả lời được (chỉ có ~10 đoạn), nên đếm thẳng trên danh mục: danh mục
+ * chính thức của Docuzen nếu bật (bản đang hiệu lực, có loại / phiên bản / tài liệu mẹ), không thì danh mục
+ * file đã index (đoán loại từ tên file). Danh sách do server tự in; LLM chỉ nhận số liệu để viết phần mở đầu.
  * Quy tắc hiểu câu hỏi theo docs/training-ver2.docx.
  */
 
-export type DocType = "sop" | "form" | "appendix";
+// list / other chỉ có khi danh mục lấy từ Docuzen (List thiết bị, đặc tính kỹ thuật, hồ sơ lô, thẩm định...)
+export type DocType = "sop" | "form" | "appendix" | "list" | "other";
 
 // Mọi mẫu dưới đây chạy trên câu đã expandAbbreviations(): chữ thường, không dấu
 const WORD_START = "(?<![a-z0-9])";
@@ -31,7 +34,12 @@ const SOP_WORDS = "sop|sops|quy trinh|qt|procedures?";
 const FORM_WORDS = "bieu mau|mau bieu|bm|forms?|formats?|mau";
 const APPENDIX_WORDS = "phu luc|pl|appendix|appendices|annex(?:es)?";
 const ALL_WORDS = "tai lieu|van ban|files?|documents?";
-const DOC_NOUNS = `${SOP_WORDS}|${FORM_WORDS}|${APPENDIX_WORDS}|${ALL_WORDS}`;
+const LIST_TYPE_WORDS = "list|lists|danh sach thiet bi";
+// Loại tài liệu khác của Docuzen gọi theo mã ("có bao nhiêu SPE của QC", "các SOP-CAL của QC"). Đặt trước "sop"
+// để "sop-cal" khớp trọn. Bỏ các mã trùng chữ tiếng Việt (gap, sat, fat) và "ar" (quá ngắn).
+const TYPE_FAMILY_WORDS =
+  "sop[\\s._-]*(?:gen|opc|cal|ppm|gtp|mic|chp)|spe|stp|bmr|bpr|bom|bop|mfr|urs|vmp|smf|qm|apqr|pvp|pvr|iqp|oqp|pqp|mtp|mtr|ssp|ssr";
+const DOC_NOUNS = `${TYPE_FAMILY_WORDS}|${SOP_WORDS}|${FORM_WORDS}|${APPENDIX_WORDS}|${LIST_TYPE_WORDS}|${ALL_WORDS}`;
 
 // Đối tượng được đếm / liệt kê phải là chính loại tài liệu: "bao nhiêu SOP", "liệt kê các biểu mẫu".
 // "quy trình X có mấy bước" không khớp vì thứ được đếm là "bước".
@@ -60,9 +68,15 @@ const VERSION_WORDS = words("phien ban|version|revision|ngay ban hanh|ban hanh|h
 const TYPE_WORDS: [DocType, RegExp][] = [
   ["form", words(FORM_WORDS)],
   ["appendix", words(APPENDIX_WORDS)],
+  ["list", words(LIST_TYPE_WORDS)],
   ["sop", words(SOP_WORDS)],
 ];
-const ALL_TYPES: DocType[] = ["sop", "form", "appendix"];
+const TYPE_ORDER: DocType[] = ["sop", "form", "appendix", "list", "other"];
+// "tài liệu" chung chung → mọi loại có trong danh mục (danh mục theo tên file chỉ có 3 loại đầu)
+const typesIn = (files: IndexedFile[]): DocType[] => {
+  const present = new Set(files.map(docTypeOf));
+  return TYPE_ORDER.filter((t) => present.has(t));
+};
 
 // Tên gọi phòng ban → mã (= tên thư mục cấp 1 trong DATA_DIR), theo mục 1.1 tài liệu training
 const DEPARTMENT_ALIASES: [string, RegExp][] = [
@@ -79,9 +93,9 @@ const DEPARTMENT_ALIASES: [string, RegExp][] = [
   ["PU", words("ke hoach|cung ung|mua hang|purchasing")],
 ];
 
-const TYPE_LABELS: Record<DocType, string> = { sop: "SOP chính", form: "Biểu mẫu", appendix: "Phụ lục" };
-const TYPE_NOUNS: Record<DocType, string> = { sop: "SOP", form: "biểu mẫu", appendix: "phụ lục" };
-const LIST_LINE_CHARS = 110;
+const TYPE_LABELS: Record<DocType, string> = { sop: "SOP chính", form: "Biểu mẫu", appendix: "Phụ lục", list: "List", other: "Tài liệu khác" };
+const TYPE_NOUNS: Record<DocType, string> = { sop: "SOP", form: "biểu mẫu", appendix: "phụ lục", list: "list", other: "tài liệu khác" };
+const LIST_LINE_CHARS = 140;
 const MAX_LIST_LINES = 300;
 const MAX_SUGGESTIONS = 5;
 
@@ -95,10 +109,25 @@ export type InventoryReply =
 
 const tokenize = (text: string) => text.normalize("NFC").toLowerCase().match(/\p{L}+|\p{N}+/gu) || [];
 
-function docTypeOf(fileName: string): DocType {
-  const name = stripExtension(fileName);
+function docTypeOf(file: IndexedFile): DocType {
+  if (file.docuzen) return file.docuzen.group;
+  const name = stripExtension(file.fileName);
   if (isMainDocument(name)) return "sop";
   return /(?<![\p{L}\p{N}])a\d{1,3}(?![\p{L}\p{N}])/iu.test(name) ? "appendix" : "form";
+}
+
+/** Mã của một tài liệu: từ Docuzen nếu có, không thì đọc từ tên file. */
+function codeOf(file: IndexedFile): FileCode | null {
+  const m = file.docuzen;
+  if (!m) return parseFileCode(file.fileName);
+  return {
+    department: file.category.toUpperCase(),
+    series: /^SOP-/i.test(m.typeCode) ? m.typeCode.slice(4).toUpperCase() : null,
+    number: m.serial ?? "",
+    sub: m.sub,
+    code: m.number,
+    title: m.title,
+  };
 }
 
 /**
@@ -106,8 +135,9 @@ function docTypeOf(fileName: string): DocType {
  * Mã = phần đầu tên file tới hết số tài liệu (+ ký hiệu F/A nếu là biểu mẫu / phụ lục):
  * "FRM-QA-SOP-GEN-0005-03 SELF INSPECTION.docx" → "frm qa sop gen 0005".
  */
-function documentKey(fileName: string): string {
-  const name = stripExtension(fileName);
+function documentKey(file: IndexedFile): string {
+  if (file.docuzen) return `dz ${file.docuzen.documentId}`;
+  const name = stripExtension(file.fileName);
   const segment = name.split(/\s+/).find((s) => /\d{3,}/.test(s));
   if (!segment) return name.toLowerCase();
   const tokens = tokenize(segment);
@@ -248,23 +278,29 @@ export function isInventoryQuestion(query: string): boolean {
 interface DocumentEntry {
   key: string;
   type: DocType;
+  typeLabel: string; // nhóm hiển thị / đếm riêng: "SOP chính", "Biểu mẫu"... loại khác theo mã loại ("SPE-FCT")
   category: string;
   fileName: string;
+  file: IndexedFile; // file đại diện (tên ngắn nhất)
   fileCount: number;
 }
 
 function collectDocuments(files: IndexedFile[]): DocumentEntry[] {
   const byKey = new Map<string, DocumentEntry>();
   for (const file of files) {
-    const type = docTypeOf(file.fileName);
-    const key = `${file.category}|${type}|${documentKey(file.fileName)}`;
+    const type = docTypeOf(file);
+    const key = `${file.category}|${type}|${documentKey(file)}`;
     const existing = byKey.get(key);
     if (existing) {
       existing.fileCount++;
       // Hiển thị tên file ngắn gọn nhất trong nhóm (thường là bản gốc, không có "translation")
-      if (file.fileName.length < existing.fileName.length) existing.fileName = file.fileName;
+      if (file.fileName.length < existing.fileName.length) {
+        existing.fileName = file.fileName;
+        existing.file = file;
+      }
     } else {
-      byKey.set(key, { key, type, category: file.category, fileName: file.fileName, fileCount: 1 });
+      const typeLabel = type === "other" && file.docuzen ? file.docuzen.typeCode : TYPE_LABELS[type];
+      byKey.set(key, { key, type, typeLabel, category: file.category, fileName: file.fileName, file, fileCount: 1 });
     }
   }
   return [...byKey.values()].sort(
@@ -278,23 +314,41 @@ const countBy = (entries: DocumentEntry[], keyOf: (e: DocumentEntry) => string) 
   return counts;
 };
 
-/** "FRM-QA-SOP-GEN-0005-F17-02 – SELF INSPECTION CHECKLIST" */
+/** Đếm theo nhóm loại, theo thứ tự SOP, biểu mẫu, phụ lục, list, rồi các loại khác theo ABC. */
+function countByType(entries: DocumentEntry[]): Record<string, number> {
+  const rank = (e: DocumentEntry) => TYPE_ORDER.indexOf(e.type);
+  const sorted = [...entries].sort((a, b) => rank(a) - rank(b) || a.typeLabel.localeCompare(b.typeLabel));
+  return countBy(sorted, (e) => e.typeLabel);
+}
+
+/** "FRM-QA-SOP-GEN-0005-F17-02 – SELF INSPECTION CHECKLIST"; Docuzen: "FRM/QA/SOP-GEN/0005 – SELF INSPECTION · bản 10" */
 function entryName(e: DocumentEntry): string {
-  const name = stripExtension(e.fileName);
-  const parsed = parseFileCode(e.fileName);
-  const display = parsed && parsed.title ? `${parsed.code} – ${parsed.title}` : name;
+  const m = e.file.docuzen;
+  const parsed = m ? null : parseFileCode(e.fileName);
+  const display = m
+    ? `${m.number}${m.title ? ` – ${m.title}` : ""} · bản ${m.version}`
+    : parsed && parsed.title
+      ? `${parsed.code} – ${parsed.title}`
+      : stripExtension(e.fileName);
   return display.length > LIST_LINE_CHARS ? `${display.slice(0, LIST_LINE_CHARS)}…` : display;
 }
 
 const numberedLines = (entries: DocumentEntry[]) =>
   entries.map((e, i) => `${i + 1}. ${entryName(e)}${e.fileCount > 1 ? ` _(${e.fileCount} file)_` : ""}`);
 
-function renderList(entries: DocumentEntry[], types: DocType[], groupByCategory: boolean): string {
-  const shown = entries.slice(0, MAX_LIST_LINES);
+function renderList(entries: DocumentEntry[], groupByType: boolean, groupByCategory: boolean): string {
+  const rank = (e: DocumentEntry) => TYPE_ORDER.indexOf(e.type);
+  const ordered = groupByType
+    ? [...entries].sort(
+        (a, b) =>
+          a.category.localeCompare(b.category) || rank(a) - rank(b) || a.typeLabel.localeCompare(b.typeLabel) || a.fileName.localeCompare(b.fileName)
+      )
+    : entries;
+  const shown = ordered.slice(0, MAX_LIST_LINES);
   const lines = [`${INVENTORY_LIST_HEADING} (${shown.length}/${entries.length})**`];
   const groups = new Map<string, DocumentEntry[]>();
   for (const e of shown) {
-    const group = [groupByCategory ? `Phòng ${e.category}` : "", types.length > 1 ? TYPE_LABELS[e.type] : ""]
+    const group = [groupByCategory ? `Phòng ${e.category}` : "", groupByType ? e.typeLabel : ""]
       .filter(Boolean)
       .join(" · ");
     groups.set(group, [...(groups.get(group) ?? []), e]);
@@ -322,7 +376,7 @@ export interface InventoryOptions {
 
 async function loadFiles(options: InventoryOptions): Promise<IndexedFile[] | null> {
   try {
-    const files = options.files ?? (await getIndexedFiles());
+    const files = options.files ?? (await getCatalogFiles());
     return files.length > 0 ? files : null;
   } catch (err) {
     console.warn("Không đọc được danh mục file:", (err as Error).message);
@@ -342,7 +396,8 @@ function mergeCodes(codes: DocCode[]): DocCode[] {
         m.number === c.number &&
         (!m.department || !c.department || m.department === c.department) &&
         (!m.series || !c.series || m.series === c.series) &&
-        (!m.sub || !c.sub || (m.sub.kind === c.sub.kind && Number(m.sub.number) === Number(c.sub.number)))
+        (!m.sub || !c.sub || (m.sub.kind === c.sub.kind && Number(m.sub.number) === Number(c.sub.number))) &&
+        (!m.typeCode || !c.typeCode || m.typeCode === c.typeCode)
     );
     if (!same) {
       merged.push({ ...c });
@@ -351,6 +406,7 @@ function mergeCodes(codes: DocCode[]): DocCode[] {
     same.department ??= c.department;
     same.series ??= c.series;
     same.sub ??= c.sub;
+    same.typeCode ??= c.typeCode;
   }
   return merged;
 }
@@ -383,6 +439,32 @@ export async function inventoryReplyFor(query: string, options: InventoryOptions
   return departmentReply(query, files, categories, options, typesNamed);
 }
 
+// Họ mã loại trùng chữ tiếng Việt thường gặp (gặp, sát / sắt, ...): chỉ nhận khi ghi đủ mã ("GAP-..." không có)
+const AMBIGUOUS_TYPE_FAMILIES = new Set(["gap", "sat", "fat", "sop", "l"]);
+
+/**
+ * Mã loại tài liệu Docuzen nêu trong câu (câu đã fold): mã đầy đủ ("spe-fct", "sop cal") hoặc cả họ ("spe" →
+ * SPE-API, SPE-FCT...). Biểu mẫu / phụ lục / list đã có từ riêng nên không xét ở đây.
+ */
+function namedTypeCodes(folded: string, files: IndexedFile[]): Set<string> {
+  const codes = Array.from(new Set(files.map((f) => f.docuzen?.typeCode).filter((c): c is string => !!c)));
+  const named = new Set<string>();
+  for (const code of codes) {
+    if (["formats", "annexures", "l"].includes(code.toLowerCase())) continue;
+    const parts = code.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (parts.length === 1 && AMBIGUOUS_TYPE_FAMILIES.has(parts[0])) continue;
+    if (parts.length > 0 && words(parts.join("[\\s._-]*")).test(folded)) named.add(code);
+  }
+  // Họ mã chỉ xét khi câu không nêu mã đầy đủ nào của họ đó ("spe-fct" thì chỉ SPE-FCT, "spe" thì cả họ)
+  const exactFamilies = new Set([...named].map((n) => n.toLowerCase().split("-")[0]));
+  for (const code of codes) {
+    const family = code.toLowerCase().split("-")[0];
+    if (!code.includes("-") || family.length < 2 || AMBIGUOUS_TYPE_FAMILIES.has(family) || exactFamilies.has(family)) continue;
+    if (words(family).test(folded)) named.add(code);
+  }
+  return named;
+}
+
 // ---------- Theo phòng ban: "QA có bao nhiêu SOP", "liệt kê biểu mẫu của IT" ----------
 
 function departmentReply(
@@ -397,14 +479,18 @@ function departmentReply(
   const namedSpecific = typesNamed.includes("form") || typesNamed.includes("appendix")
     ? typesNamed.filter((t) => t !== "sop")
     : typesNamed;
+  // Mã loại cụ thể của Docuzen ("có bao nhiêu SPE của QC", "BMR của FD", "SOP-CAL của QC")
+  const typeCodes = namedTypeCodes(folded, files);
   const types: DocType[] =
-    namedSpecific.length > 0
-      ? namedSpecific
-      : words(ALL_WORDS).test(folded)
-        ? ALL_TYPES
-        : options.docTypes?.length
-          ? options.docTypes
-          : ["sop"];
+    typeCodes.size > 0
+      ? typesIn(files.filter((f) => f.docuzen && typeCodes.has(f.docuzen.typeCode)))
+      : namedSpecific.length > 0
+        ? namedSpecific
+        : words(ALL_WORDS).test(folded)
+          ? typesIn(files)
+          : options.docTypes?.length
+            ? options.docTypes
+            : ["sop"];
   // Phòng model tách ra + phòng ghi rõ trong câu ("sop của QA và QC": model đôi khi bỏ sót một phòng)
   const routedDepartments = (options.departments ?? []).filter((d) => categories.includes(d));
   const departments = Array.from(new Set([...routedDepartments, ...departmentsIn(query, categories)])).sort();
@@ -416,7 +502,16 @@ function departmentReply(
   const onlyMissing = departments.length === 0 && missingDepartments.length > 0;
 
   const inScope = files.filter((f) => !onlyMissing && (departments.length === 0 || departments.includes(f.category)));
-  const entries = collectDocuments(inScope).filter((e) => types.includes(e.type));
+  const entries = collectDocuments(inScope).filter((e) =>
+    typeCodes.size > 0 ? !!e.file.docuzen && typeCodes.has(e.file.docuzen.typeCode) : types.includes(e.type)
+  );
+  // Nhóm đếm riêng: SOP, biểu mẫu, phụ lục, list; loại khác của Docuzen theo từng mã loại (SPE-FCT, BMR-TAB...)
+  const labels = Array.from(new Set(entries.map((e) => e.typeLabel)));
+  // "tài liệu" chung chung: chỉ nêu các loại phạm vi này có (không in "0 list" cho phòng không có list nào)
+  const askedAll = typeCodes.size === 0 && namedSpecific.length === 0 && words(ALL_WORDS).test(folded);
+  const shownTypes = askedAll ? types.filter((t) => entries.some((e) => e.type === t)) : types;
+  const typeNames = typeCodes.size > 0 ? [...typeCodes].sort() : shownTypes.map((t) => TYPE_LABELS[t]);
+  const fromDocuzen = files.some((f) => f.docuzen);
   // Câu đếm chỉ trả số; liệt kê khi người dùng yêu cầu. Câu không có từ đếm ("các sop của qa", "sop qa") là liệt kê.
   const wantsList = options.wantsList === true || LIST_WORDS.test(folded) || !COUNT_WORDS.test(folded);
 
@@ -429,19 +524,23 @@ function departmentReply(
           : "tất cả phòng ban",
     phongBanKhongCoTrongKho: missingDepartments.length > 0 ? missingDepartments : undefined,
     phongBanCoTrongKho: missingDepartments.length > 0 ? categories : undefined,
-    loaiTaiLieu: types.map((t) => TYPE_LABELS[t]).join(", "),
+    loaiTaiLieu: typeNames.join(", "),
     tongSo: entries.length,
     soFile: entries.reduce((sum, e) => sum + e.fileCount, 0),
     theoPhongBan: departments.length === 1 || onlyMissing ? undefined : countBy(entries, (e) => e.category),
-    theoLoai: types.length > 1 ? countBy(entries, (e) => TYPE_LABELS[e.type]) : undefined,
-    cachDem:
-      "Mỗi mã tài liệu tính là 1 (nhiều file cùng mã như bản dịch, bản PDF và Word chỉ tính 1). " +
-      "SOP chính = file không có ký hiệu F (biểu mẫu) hay A (phụ lục) trong mã. Các loại đếm riêng, không cộng gộp.",
+    theoLoai: labels.length > 1 || types.length > 1 ? countByType(entries) : undefined,
+    cachDem: fromDocuzen
+      ? "Theo danh mục chính thức của Docuzen, chỉ tính phiên bản đang hiệu lực; mỗi số tài liệu tính là 1. Các loại đếm riêng, không cộng gộp."
+      : "Mỗi mã tài liệu tính là 1 (nhiều file cùng mã như bản dịch, bản PDF và Word chỉ tính 1). " +
+        "SOP chính = file không có ký hiệu F (biểu mẫu) hay A (phụ lục) trong mã. Các loại đếm riêng, không cộng gộp.",
     danhSachBenDuoi: wantsList,
   };
 
   // Câu mở đầu dựng sẵn khi LLM lỗi. Các loại nêu riêng từng con số, không cộng gộp.
-  const counts = types.map((t) => `**${entries.filter((e) => e.type === t).length}** ${TYPE_NOUNS[t]}`).join(", ");
+  const counts =
+    typeCodes.size > 0 || labels.length > shownTypes.length
+      ? Object.entries(countByType(entries)).map(([label, n]) => `**${n}** ${label}`).join(", ") || "**0** tài liệu"
+      : shownTypes.map((t) => `**${entries.filter((e) => e.type === t).length}** ${TYPE_NOUNS[t]}`).join(", ") || "**0** tài liệu";
   const missingNote =
     missingDepartments.length > 0
       ? `Kho tài liệu trợ lý đang có không có tài liệu của phòng ${missingDepartments.join(", ")}. Các phòng hiện có: ${categories.join(", ")}.`
@@ -455,7 +554,7 @@ function departmentReply(
     kind: "list",
     summaryJson: JSON.stringify(summary, null, 1),
     list: {
-      markdown: wantsList && entries.length > 0 ? renderList(entries, types, departments.length !== 1) : "",
+      markdown: wantsList && entries.length > 0 ? renderList(entries, labels.length > 1, departments.length !== 1) : "",
       fallbackIntro,
     },
   };
@@ -472,8 +571,53 @@ interface SopGroup {
   appendices: DocumentEntry[];
 }
 
+const compactCode = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+const vnDate = (iso: string) => iso.split("-").reverse().join("/"); // "2026-09-29" → "29/09/2026"
+const today = () => new Date().toISOString().slice(0, 10);
+
+/** Tài liệu Docuzen có khớp mã người dùng hỏi không (chỉ xét tài liệu chính, không xét biểu mẫu / phụ lục). */
+function docuzenParentMatches(file: IndexedFile, code: DocCode): boolean {
+  const m = file.docuzen;
+  if (!m || m.group === "form" || m.group === "appendix" || m.serial !== code.number) return false;
+  if (code.department && file.category.toUpperCase() !== code.department) return false;
+  if (code.typeCode) {
+    // "FRM/QC/SPE-FCT/0008" → đúng loại SPE-FCT; "list pd 1" → loại L
+    return compactCode(m.typeCode) === compactCode(code.typeCode);
+  }
+  // Mã SOP ("sop qa 13", "FRM/QA/SOP-GEN/0013"): chỉ các loại SOP-..., đúng nhóm nếu có nêu
+  return m.group === "sop" && (!code.series || m.typeCode.toUpperCase() === `SOP-${code.series}`);
+}
+
+/** Danh mục Docuzen: tài liệu mẹ khớp mã + biểu mẫu / phụ lục trỏ về nó (LinkedDocumentID). */
+function docuzenGroupsFor(code: DocCode, files: IndexedFile[]): SopGroup[] {
+  const parents = files.filter((f) => docuzenParentMatches(f, code));
+  // Cùng phòng, cùng số nhưng khác nhóm (SOP-GEN 0003 và SOP-CAL 0003): ghi rõ nhóm trong tên
+  const sameNumber = (f: IndexedFile) => parents.filter((p) => p.category === f.category).length > 1;
+  return parents
+    .map((parent) => {
+      const m = parent.docuzen!;
+      const children = collectDocuments(files.filter((f) => f.docuzen?.parentId === m.documentId));
+      const isSop = m.group === "sop";
+      return {
+        label: sopLabel({
+          department: parent.category.toUpperCase(),
+          series: isSop && (sameNumber(parent) || code.series) ? m.typeCode.slice(4).toUpperCase() : null,
+          number: m.serial ?? code.number,
+          typeCode: isSop ? null : m.typeCode,
+        }),
+        department: parent.category.toUpperCase(),
+        number: m.serial ?? code.number,
+        main: collectDocuments([parent])[0] ?? null,
+        forms: children.filter((e) => e.type === "form"),
+        appendices: children.filter((e) => e.type === "appendix"),
+      };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /** Các SOP khớp mã (một mã không nêu phòng có thể khớp nhiều phòng). */
 function sopGroupsFor(code: DocCode, files: IndexedFile[]): SopGroup[] {
+  if (files.some((f) => f.docuzen)) return docuzenGroupsFor(code, files);
   const byDepartment = new Map<string, IndexedFile[]>();
   for (const file of files) {
     const fileCode = parseFileCode(file.fileName);
@@ -506,9 +650,12 @@ function sopGroupsFor(code: DocCode, files: IndexedFile[]): SopGroup[] {
 
 /** "SOP QA 0999" không có: gợi ý SOP cùng phòng có số gần nhất và SOP cùng số ở phòng khác. */
 function suggestionsFor(code: DocCode, files: IndexedFile[]): string[] {
-  const mains = collectDocuments(files.filter((f) => isMainDocument(f.fileName)))
-    .map((e) => ({ e, code: parseFileCode(e.fileName) }))
-    .filter((x): x is { e: DocumentEntry; code: NonNullable<typeof x.code> } => !!x.code);
+  // Gợi ý cùng loại với mã đang hỏi: hỏi SOP thì gợi ý SOP, hỏi SPE-FCT thì gợi ý SPE-FCT
+  const sameKind = (f: IndexedFile) =>
+    !f.docuzen || (code.typeCode ? compactCode(f.docuzen.typeCode) === compactCode(code.typeCode) : f.docuzen.group === "sop");
+  const mains = collectDocuments(files.filter((f) => docTypeOf(f) !== "form" && docTypeOf(f) !== "appendix" && sameKind(f)))
+    .map((e) => ({ e, code: codeOf(e.file) }))
+    .filter((x): x is { e: DocumentEntry; code: NonNullable<typeof x.code> } => !!x.code && !!x.code.number);
   const departmentOf = (x: (typeof mains)[number]) => x.code.department ?? x.e.category.toUpperCase();
   const target = Number(code.number);
   const sameDepartment = mains
@@ -627,12 +774,12 @@ export async function docLookupReplyFor(query: string, options: InventoryOptions
     const lines: string[] = [];
     for (const g of groups) {
       const pool = code.sub.kind === "form" ? g.forms : g.appendices;
-      const match = pool.find((e) => Number(parseFileCode(e.fileName)?.sub?.number) === Number(code.sub!.number));
+      const match = pool.find((e) => Number(codeOf(e.file)?.sub?.number) === Number(code.sub!.number));
       const parent = g.main ? `**${g.label}** – ${entryName(g.main)}` : `**${g.label}** (kho chưa có file SOP chính)`;
       if (match) {
         lines.push(`${noun[0].toUpperCase()}${noun.slice(1)} ${entryName(match)} thuộc ${parent}.`);
       } else {
-        const others = pool.map((e) => parseFileCode(e.fileName)?.sub).filter(Boolean).map((s) => `${s!.kind === "form" ? "F" : "A"}${s!.number}`);
+        const others = pool.map((e) => codeOf(e.file)?.sub).filter(Boolean).map((s) => `${s!.kind === "form" ? "F" : "A"}${s!.number}`);
         lines.push(
           `Không tìm thấy ${noun} ${subLabel} trong kho. Theo mã thì ${noun} này thuộc ${parent}.` +
             (others.length > 0 ? ` SOP này hiện có các ${noun}: ${others.join(", ")}.` : ` SOP này không có ${noun} nào trong kho.`)
@@ -645,12 +792,21 @@ export async function docLookupReplyFor(query: string, options: InventoryOptions
   if (groups.length === 0) return notFound(code, files, sopLabel(code));
   const folded = expandAbbreviations(query);
   const lines = groups.map((g) => {
+    const m = g.main?.file.docuzen;
     const head = g.main
       ? `**${g.label}** (phòng ${g.main.category}): ${entryName(g.main)}${g.main.fileCount > 1 ? ` _(${g.main.fileCount} file)_` : ""}.`
       : `**${g.label}**: kho chưa có file SOP chính, chỉ có biểu mẫu / phụ lục.`;
-    return `${head} Có ${g.forms.length} biểu mẫu, ${g.appendices.length} phụ lục.`;
+    // Docuzen có phiên bản và ngày hiệu lực của bản đang hiệu lực
+    const version = m
+      ? ` Phiên bản ${m.version} đang hiệu lực` +
+        (m.effectiveDate ? ` từ ${vnDate(m.effectiveDate)}` : "") +
+        (m.expirationDate ? `, hạn rà soát ${vnDate(m.expirationDate)}${m.expirationDate < today() ? " (đã quá hạn)" : ""}` : "") +
+        "."
+      : "";
+    return `${head}${version} Có ${g.forms.length} biểu mẫu, ${g.appendices.length} phụ lục.`;
   });
-  if (VERSION_WORDS.test(folded)) {
+  const hasVersionInfo = groups.some((g) => g.main?.file.docuzen);
+  if (VERSION_WORDS.test(folded) && !hasVersionInfo) {
     lines.push(
       "Kho tài liệu chưa lưu phiên bản, ngày ban hành hay trạng thái hiệu lực của tài liệu, nên tôi không trả lời được phần này. Bạn kiểm tra trên bản gốc hoặc danh mục tài liệu của phòng nhé."
     );

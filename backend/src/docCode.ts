@@ -15,6 +15,8 @@ export interface DocCode {
   series: string | null; // nhóm sau "SOP-": "GEN", "CAL"; null nếu không nêu
   number: string; // luôn 4 chữ số: "13" → "0013"
   sub: { kind: "form" | "appendix"; number: string } | null; // -F02 → form "02"
+  // Loại tài liệu khác SOP, khi mã ghi rõ: "SPE-FCT" (FRM/QC/SPE-FCT/0008), "L" (FRM/PD/L/0001), "APQR". SOP → null
+  typeCode: string | null;
   span: [number, number]; // vị trí trong chuỗi đã fold() (để bỏ phần mã khi tìm phòng ban nhắc riêng)
 }
 
@@ -32,6 +34,8 @@ export function fold(text: string): string {
 export const DEPARTMENT_CODES = ["qa", "qc", "pd", "wh", "me", "it", "hr", "ra", "fd", "ad", "ds", "pu", "ts", "prd"];
 
 const SEP = "[\\s./_-]*";
+// Số tài liệu Docuzen: các phần phải có dấu ngăn cách, để "APQR" không bị cắt thành "APQ" + "R"
+const SEP1 = "[\\s./_-]+";
 const B = "(?<![a-z0-9])"; // đầu từ
 const DEPT = `(${DEPARTMENT_CODES.join("|")})(?![a-z])`;
 const SOP = "(?:sop|quy trinh|qt)";
@@ -58,17 +62,41 @@ const PATTERNS: Pattern[] = [
   // FRM/IT/SOP-GEN/0013-F01, FRM.QA.SOP-GEN.0005-A03-01, frm qa sop 13
   {
     re: new RegExp(`${B}frm${SEP}([a-z]{2,4})${SEP}sop(?:${SEP}([a-z]{2,4}))?${SEP}${NUM}${SUB}`, "g"),
-    pick: (m) => ({ department: dept(m[1]), series: upper(m[2]), number: pad(m[3]), sub: sub(m[4], m[5]) }),
+    pick: (m) => ({ department: dept(m[1]), series: upper(m[2]), number: pad(m[3]), sub: sub(m[4], m[5]), typeCode: null }),
+  },
+  // Số tài liệu Docuzen loại khác SOP: FRM/QC/SPE-FCT/0008, FRM/QA/EQP-PQP/0008/F01, FRM/QC/RQP/0006/F02, FRM/PD/L/0001
+  {
+    re: new RegExp(`${B}frm${SEP1}([a-z]{2,7})${SEP1}(?!sop(?![a-z]))([a-z]{1,6}(?:[._-][a-z]{2,4})?)${SEP1}${NUM}${SUB}`, "g"),
+    pick: (m) => {
+      const isDepartment = DEPARTMENT_CODES.includes(m[1]);
+      return {
+        department: isDepartment ? dept(m[1]) : null,
+        series: null,
+        number: pad(m[3]),
+        sub: sub(m[4], m[5]),
+        typeCode: (isDepartment ? m[2] : `${m[1]}-${m[2]}`).replace(/[._]/g, "-").toUpperCase(),
+      };
+    },
+  },
+  // Loại tài liệu ghi kèm năm, không có phòng: FRM/APQR/2026/0024/A03
+  {
+    re: new RegExp(`${B}frm${SEP1}([a-z]{2,6})${SEP1}(?:19|20)\\d{2}${SEP1}${NUM}${SUB}`, "g"),
+    pick: (m) => ({ department: null, series: null, number: pad(m[2]), sub: sub(m[3], m[4]), typeCode: m[1].toUpperCase() }),
+  },
+  // list pd 1, list PD 0001
+  {
+    re: new RegExp(`${B}list${SEP}${DEPT}${SEP}${NUM}`, "g"),
+    pick: (m) => ({ department: dept(m[1]), series: null, number: pad(m[2]), sub: null, typeCode: "L" }),
   },
   // qa sop 13, QA-SOP-0013
   {
     re: new RegExp(`${B}${DEPT}${SEP}${SOP}${SEP}${NUM}${SUB}`, "g"),
-    pick: (m) => ({ department: dept(m[1]), series: null, number: pad(m[2]), sub: sub(m[3], m[4]) }),
+    pick: (m) => ({ department: dept(m[1]), series: null, number: pad(m[2]), sub: sub(m[3], m[4]), typeCode: null }),
   },
   // sop qa 13, sopqa13, SOP-QA-0013, quy trình QA 0005
   {
     re: new RegExp(`${B}${SOP}${SEP}${DEPT}${SEP}${NUM}${SUB}`, "g"),
-    pick: (m) => ({ department: dept(m[1]), series: null, number: pad(m[2]), sub: sub(m[3], m[4]) }),
+    pick: (m) => ({ department: dept(m[1]), series: null, number: pad(m[2]), sub: sub(m[3], m[4]), typeCode: null }),
   },
   // sop 13, SOP-GEN 0005 QA, sop 13 của qa, SOP 1012 IT, sop 13 phòng qa
   {
@@ -76,7 +104,7 @@ const PATTERNS: Pattern[] = [
       `${B}${SOP}(?:${SEP}${SERIES})?${SEP}${NUM}${SUB}(?:\\s+(?:cua\\s+)?(?:phong\\s+|ben\\s+|bo phan\\s+)?${DEPT})?`,
       "g"
     ),
-    pick: (m) => ({ department: dept(m[5]), series: upper(m[1]), number: pad(m[2]), sub: sub(m[3], m[4]) }),
+    pick: (m) => ({ department: dept(m[5]), series: upper(m[1]), number: pad(m[2]), sub: sub(m[3], m[4]), typeCode: null }),
   },
 ];
 
@@ -123,12 +151,13 @@ export function textWithoutCodes(query: string, codes: DocCode[]): string {
   return text;
 }
 
-export const codeKey = (c: Pick<DocCode, "department" | "series" | "number" | "sub">) =>
-  [c.department ?? "", c.series ?? "", c.number, c.sub ? `${c.sub.kind[0]}${c.sub.number}` : ""].join("|");
+export const codeKey = (c: Pick<DocCode, "department" | "series" | "number" | "sub"> & { typeCode?: string | null }) =>
+  [c.typeCode ?? "", c.department ?? "", c.series ?? "", c.number, c.sub ? `${c.sub.kind[0]}${c.sub.number}` : ""].join("|");
 
-/** "SOP QA 0013", "biểu mẫu F02 của SOP QA 0013" */
-export function sopLabel(c: Pick<DocCode, "department" | "series" | "number">): string {
-  return ["SOP", c.department, c.series, c.number].filter(Boolean).join(" ");
+/** "SOP QA 0013", "SOP QA GEN 0013"; loại khác: "SPE-FCT QC 0008", "List PD 0001", "APQR 0024" */
+export function sopLabel(c: Pick<DocCode, "department" | "series" | "number"> & { typeCode?: string | null }): string {
+  const type = c.typeCode ? (c.typeCode === "L" ? "List" : c.typeCode) : "SOP";
+  return [type, c.department, c.typeCode ? null : c.series, c.number].filter(Boolean).join(" ");
 }
 
 export interface FileCode {
@@ -187,6 +216,11 @@ export function parseFileCode(fileName: string): FileCode | null {
 export function fileMatchesCode(fileCode: FileCode, category: string, code: DocCode): boolean {
   if (fileCode.number !== code.number) return false;
   if (code.series && fileCode.series && fileCode.series !== code.series) return false;
+  // Mã loại khác SOP ("FRM/QC/SPE-FCT/0008"): phần mã trong tên file phải có đúng loại đó
+  const compact = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (code.typeCode && !compact(fileCode.code).includes(compact(code.typeCode))) return false;
+  // Mã SOP ("sop qa 13") không khớp tài liệu loại khác cùng số (vd EQP-PQP 0013)
+  if (!code.typeCode && fileCode.series === null && /frm/i.test(fileCode.code) && !/sop/i.test(fileCode.code)) return false;
   if (!code.department) return true;
   const fileDepartment = fileCode.department ?? category.toUpperCase();
   return fileDepartment === code.department;

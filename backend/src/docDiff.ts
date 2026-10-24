@@ -1,7 +1,10 @@
 import path from "path";
 import { diffArrays, diffWords } from "diff";
 import { config } from "./config.js";
-import { readFile } from "./fileReaders.js";
+import fs from "fs/promises";
+import os from "os";
+import { readFile, type ParsedDocument } from "./fileReaders.js";
+import { currentSourceOf, docuzenDocumentId, downloadDocuzenFile } from "./docuzenCatalog.js";
 import { stripExtension } from "./fileCatalog.js";
 
 /**
@@ -430,10 +433,29 @@ function detectMoves(changes: DiffChange[]): DiffChange[] {
 
 // ---------------- Đọc file + kết quả ----------------
 
+/**
+ * Toàn văn một tài liệu trong kho. Tài liệu Docuzen ("docuzen://<DocumentID>", index bằng ingest:docuzen) không
+ * có bản sao trên đĩa: tải file của bản đang hiệu lực vào thư mục tạm, đọc xong xoá.
+ */
 export async function readFullText(filePath: string): Promise<string> {
-  const docs = await readFile(filePath, config.dataDir);
-  return docs.map((d) => (d.metadata.sheetName ? `${d.metadata.sheetName}\n${d.text}` : d.text)).join("\n\n");
+  const documentId = docuzenDocumentId(filePath);
+  if (documentId === null) return joinParts(await readFile(filePath, config.dataDir));
+
+  const source = await currentSourceOf(documentId);
+  if (!source) throw new Error(`Tài liệu Docuzen ${documentId} không còn bản hiện hành hoặc không có file đọc được`);
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "docuzen-read-"));
+  try {
+    const ext = path.extname(source.sourcePath.replace(/\\/g, "/")).toLowerCase();
+    const tmpPath = path.join(workDir, source.file.category, `doc${ext}`);
+    await downloadDocuzenFile(source.sourcePath, tmpPath);
+    return joinParts(await readFile(tmpPath, workDir));
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
 }
+
+const joinParts = (docs: ParsedDocument[]) =>
+  docs.map((d) => (d.metadata.sheetName ? `${d.metadata.sheetName}\n${d.text}` : d.text)).join("\n\n");
 
 export async function diffDocuments(filePathA: string, filePathB: string): Promise<DiffResult> {
   const [textA, textB] = await Promise.all([readFullText(filePathA), readFullText(filePathB)]);

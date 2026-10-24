@@ -16,6 +16,7 @@ import type { IndexedFile } from "./qdrantService.js";
  *   npm run eval:training                  model router thật (Groq) + kho mẫu bên dưới
  *   npm run eval:training -- --offline     không gọi Groq: chỉ nhận diện bằng từ khóa + quy tắc cố định
  *   npm run eval:training -- --live        dùng kho thật đang index trong Qdrant thay cho kho mẫu
+ *   npm run eval:training -- --docuzen     dùng danh mục chính thức của Docuzen (bản đang hiệu lực) thay cho kho mẫu
  *   npm run eval:training -- --all-sops    câu sinh tự động cho MỌI SOP trong kho (thêm --live để chạy trên kho thật)
  *   npm run eval:training -- 9 10 28       chỉ chạy các câu số 9, 10, 28
  * Kết quả đầy đủ: .cache/training-eval.json
@@ -183,9 +184,9 @@ interface RefDoc {
   rawDepartment: string; // như viết trong tên file ("PRD")
 }
 
-// Tên file đúng chuẩn: FRM + phòng ban + SOP + nhóm + mã, ngăn cách bằng "-", "_" hoặc "." tùy ý
+// Tên file đúng chuẩn: FRM + phòng ban + SOP + nhóm + mã, ngăn cách bằng "-", "_", "." (tên file) hoặc "/" (số Docuzen)
 // ("FRM-QA-SOP-GEN-0016", "FRM_QA_SOP-GEN_0016", "FRM.QA.SOP-GEN.0005-F11-03")
-const CODE_RE = /^FRM[-_.]([A-Z]+)[-_.]SOP[-_.]([A-Z]+)[-_.](\d{4})(?:[-_.]([FA])(\d{1,3}))?(?![A-Z0-9])/i;
+const CODE_RE = /^FRM[-_./]([A-Z]+)[-_./]SOP[-_./]([A-Z]+)[-_./](\d{4})(?:[-_./]([FA])(\d{1,3}))?(?![A-Z0-9])/i;
 
 function refDoc(file: IndexedFile): RefDoc | null {
   const m = file.fileName.match(CODE_RE);
@@ -334,7 +335,7 @@ async function replyFor(route: RoutedQuery, files: IndexedFile[]): Promise<Inven
 }
 
 const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
-const TYPE_LABELS: Record<DocType, string> = { sop: "SOP chính", form: "Biểu mẫu", appendix: "Phụ lục" };
+const TYPE_LABELS: Record<DocType, string> = { sop: "SOP chính", form: "Biểu mẫu", appendix: "Phụ lục", list: "List", other: "Tài liệu khác" };
 
 function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: RefDoc[]): string[] {
   const problems: string[] = [];
@@ -365,8 +366,10 @@ function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: 
 
   if (c.intent === "TRA_NGUOC" || c.intent === "THONG_TIN_TAI_LIEU") {
     const [department, number] = c.code!.split(" ");
-    const parent = docs.find((d) => d.department === department && d.number === number && d.type === "sop");
-    const mentionsParent = parent && listedOrMentioned(output).includes(parent.key);
+    // Cùng phòng, cùng số có thể có nhiều SOP khác nhóm (SOP-CAL 0003 và SOP-GEN 0003): nêu đúng một trong số đó là đạt
+    const parents = docs.filter((d) => d.department === department && d.number === number && d.type === "sop");
+    const mentioned = listedOrMentioned(output);
+    const mentionsParent = parents.some((p) => mentioned.includes(p.key));
     if (!mentionsParent) problems.push(`không nêu SOP ${department} ${number}: ${output.slice(0, 150)}`);
     return problems;
   }
@@ -421,7 +424,7 @@ function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: 
 
 /** Khóa các mã có trong câu trả lời (kể cả nằm giữa câu, không chỉ dòng danh sách). */
 function listedOrMentioned(output: string): string[] {
-  return (output.match(/FRM[-_.][A-Z]+[-_.]SOP[-_.][A-Z]+[-_.]\d{4}(?:[-_.][FA]\d{1,3})?/gi) ?? [])
+  return (output.match(/FRM[-_./][A-Z]+[-_./]SOP[-_./][A-Z]+[-_./]\d{4}(?:[-_./][FA]\d{1,3})?/gi) ?? [])
     .map((code) => refDoc({ fileName: code, category: "", filePath: "" })?.key)
     .filter((k): k is string => !!k);
 }
@@ -462,11 +465,15 @@ async function main() {
   const args = process.argv.slice(2);
   const offline = args.includes("--offline");
   const live = args.includes("--live");
+  const docuzen = args.includes("--docuzen");
   const allSops = args.includes("--all-sops");
   const ids = args.filter((a) => /^\d+$/.test(a)).map(Number);
 
   let files = FIXTURE_FILES;
-  if (live) {
+  if (docuzen) {
+    const { getDocuzenFiles } = await import("./docuzenCatalog.js");
+    files = await getDocuzenFiles();
+  } else if (live) {
     const { getIndexedFiles } = await import("./fileCatalog.js");
     files = await getIndexedFiles();
   }
@@ -480,9 +487,15 @@ async function main() {
   // Chỉ đo trên file đặt tên đúng chuẩn; file khác (file test, tên chưa đổi) liệt kê ra để biết mà sửa tên
   const ignored = files.filter((f) => !refDoc(f));
   files = files.filter((f) => refDoc(f));
-  if (ignored.length > 0) {
+  if (ignored.length > 0 && docuzen) {
+    // Docuzen có hàng nghìn tài liệu loại khác SOP (SPE, BMR, thẩm định...): bộ câu hỏi này chỉ đo SOP
+    console.log(`Bỏ qua ${ignored.length} tài liệu không thuộc nhóm SOP (loại khác, hoặc biểu mẫu / phụ lục của loại khác)
+`);
+  } else if (ignored.length > 0) {
+    const MAX_SHOWN = 30;
     console.log(`Bỏ qua ${ignored.length} file tên không đúng chuẩn FRM-<phòng>-SOP-<nhóm>-<mã>:`);
-    for (const f of ignored) console.log(`   ${f.category}/${f.fileName}`);
+    for (const f of ignored.slice(0, MAX_SHOWN)) console.log(`   ${f.category}/${f.fileName}`);
+    if (ignored.length > MAX_SHOWN) console.log(`   ... và ${ignored.length - MAX_SHOWN} file khác`);
     console.log();
   }
 
@@ -493,7 +506,7 @@ async function main() {
   const cases = (ids.length > 0 ? source.filter((c) => ids.includes(c.id)) : source).map((c) => adaptToCatalog(c, docs, categories));
   const heuristic = offline || allSops;
   console.log(
-    `Chạy ${cases.length} câu${allSops ? " sinh cho mọi SOP trong kho" : ""} (${heuristic ? "không gọi model, chỉ từ khóa + quy tắc" : "model router thật"}, ${live ? "kho thật" : "kho mẫu"} ${files.length} file)...\n`
+    `Chạy ${cases.length} câu${allSops ? " sinh cho mọi SOP trong kho" : ""} (${heuristic ? "không gọi model, chỉ từ khóa + quy tắc" : "model router thật"}, ${docuzen ? "danh mục Docuzen" : live ? "kho thật" : "kho mẫu"} ${files.length} file)...\n`
   );
 
   const results: any[] = [];

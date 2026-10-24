@@ -9,6 +9,7 @@
     "ingest": "npx tsx src/ingest.ts",
     "ingest:reset": "npx tsx src/ingest.ts --reset",
     "ingest:incremental": "npx tsx src/incrementalIngest.ts",
+    "ingest:docuzen": "npx tsx src/docuzenIngest.ts",
     "qualzen:explore": "npx tsx src/qualzenExplore.ts",
     "docuzen:explore": "npx tsx src/docuzenExplore.ts",
     "qualzen:smoke": "npx tsx src/qualzenSmoke.ts",

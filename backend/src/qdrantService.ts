@@ -178,6 +178,23 @@ export interface IndexedFile {
   fileName: string;
   filePath: string;
   category: string;
+  // Có khi danh mục lấy từ Docuzen (docuzenCatalog.ts): thông tin chính thức thay cho việc đoán từ tên file
+  docuzen?: DocuzenMeta;
+}
+
+export interface DocuzenMeta {
+  documentId: number;
+  number: string; // số tài liệu chính thức: "FRM/QA/SOP-GEN/0005", "FRM/QC/RQP/0006/F02"
+  title: string;
+  typeCode: string; // mã loại: "SOP-GEN", "Formats", "Annexures", "L", "SPE-FCT"...
+  group: "sop" | "form" | "appendix" | "list" | "other";
+  serial: string | null; // số 4 chữ số cuối trong số tài liệu ("0005")
+  sub: { kind: "form" | "appendix"; number: string } | null; // "/F02" → form "02"
+  parentId: number | null; // tài liệu mẹ của biểu mẫu / phụ lục (LinkedDocumentID)
+  versionId: number;
+  version: number;
+  effectiveDate: string | null; // yyyy-mm-dd
+  expirationDate: string | null;
 }
 
 // Danh sách file đã index (mỗi file 1 dòng, kèm phòng ban). Throw khi lỗi.

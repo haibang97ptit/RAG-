@@ -1,4 +1,4 @@
-import { getIndexedFiles } from "./fileCatalog.js";
+import { getCatalogFiles } from "./fileCatalog.js";
 import { glossaryHint, glossaryMatches } from "./glossary.js";
 import { formatExamples, similarExamples } from "./routerExamples.js";
 import { looksLikeQualzenQuestion } from "./qualzenAssistant.js";
@@ -55,7 +55,7 @@ export interface RoutedQuery {
 }
 
 const TASKS: Task[] = ["chitchat", "sop_question", "doc_overview", "doc_inventory", "doc_lookup", "doc_compare", "overlap_check", "qualzen"];
-const DOC_TYPES: DocType[] = ["sop", "form", "appendix"];
+const DOC_TYPES: DocType[] = ["sop", "form", "appendix", "list"];
 
 const ROUTER_PROMPT = `Bạn phân tích câu hỏi gửi tới trợ lý nội bộ của một công ty dược. Trợ lý tra cứu kho tài liệu SOP (SOP chính, biểu mẫu F.., phụ lục A..) và hệ thống QualZen (Action Item, CCN/Change Control, CAPA).
 
@@ -79,7 +79,7 @@ Thứ tự ưu tiên khi phân vân (dừng ở luật đầu tiên đúng):
 
 Từ điển:
 - Phòng ban: QA = đảm bảo chất lượng, phòng chất lượng; QC = kiểm nghiệm, kiểm soát / kiểm tra chất lượng; IT = CNTT, công nghệ thông tin, phòng máy tính; HR = nhân sự, hành chính nhân sự, HCNS; ME = cơ điện; FD = phát triển công thức; PD = sản xuất, xưởng; RA = đăng ký thuốc; WH = kho (phòng kho; "kho tài liệu" là cả kho, không phải WH).
-- Loại: SOP = quy trình, QT; biểu mẫu = form, format, BM, mẫu, "f" đứng riêng cạnh sop / mã; phụ lục = PL, appendix, annex.
+- Loại: SOP = quy trình, QT; biểu mẫu = form, format, BM, mẫu, "f" đứng riêng cạnh sop / mã; phụ lục = PL, appendix, annex; list = List (vd List thiết bị, mã FRM/PD/L/0001). Kho còn các loại khác gọi theo mã loại: SPE (đặc tính kỹ thuật), STP (phương pháp kiểm nghiệm), AR (phiếu phân tích), BMR / BPR (hồ sơ lô), BOM, MFR, các hồ sơ thẩm định (PVP, IQP, OQP, PQP...): đếm / liệt kê các loại này cũng là doc_inventory.
 - Mã: "FRM/IT/SOP-GEN/0013" (tên file viết FRM-IT-SOP-GEN-0013) = SOP 0013 của IT; thêm "-F02" là biểu mẫu, "-A01" là phụ lục. "sop qa 13" = "sopqa13" = "SOP QA 0013". Phòng ban lấy theo mã.
 - Viết tắt: ds = danh sách, sl = số lượng.
 
@@ -88,7 +88,7 @@ Các trường khác:
 - standalone_query: viết lại câu hỏi thành câu ĐỘC LẬP, đủ ý, tiếng Việt có dấu (thay đại từ bằng đối tượng cụ thể trong lịch sử, giữ nguyên mã, sửa lỗi chính tả). Câu chỉ đòi đổi cách trình bày → nêu lại chủ đề đang nói. Câu đã rõ → chép nguyên.
 - doc_codes: các mã tài liệu được nhắc, chép như người dùng viết ("sop qa 13", "FRM/QA/SOP-GEN/0039", "P.IT.1016"); kể cả mã nằm trong lịch sử mà câu hỏi đang nói tới. Không có → [].
 - departments: phòng ban được nhắc, chỉ dùng tên trong danh sách PHÒNG BAN TRONG KHO bên dưới. Không nhắc → [].
-- doc_types (cho doc_inventory): "sop", "form" (biểu mẫu), "appendix" (phụ lục). "tài liệu / văn bản / file" chung chung → cả ba. Nêu mã SOP mà không nói loại → ["form","appendix"]. Không nói rõ → ["sop"].
+- doc_types (cho doc_inventory): "sop", "form" (biểu mẫu), "appendix" (phụ lục), "list". "tài liệu / văn bản / file" chung chung → ["sop","form","appendix","list"]. Loại khác (SPE, BMR...) → để code tự nhận từ câu hỏi, doc_types []. Nêu mã SOP mà không nói loại → ["form","appendix"]. Không nói rõ → ["sop"].
 - list: true nếu muốn xem danh sách / tên các tài liệu (kể cả câu không có từ đếm như "các sop của qa", "sop qa"); false nếu chỉ hỏi số lượng.
 - topic: chủ đề quy định khi task là overlap_check và người dùng nêu chủ đề (vd "đào tạo nhân viên mới"); rà chung chung → null.
 
@@ -250,7 +250,7 @@ export async function routeQuery(
   let categories = options.categories;
   if (!categories) {
     try {
-      categories = Array.from(new Set((await getIndexedFiles()).map((f) => f.category))).sort();
+      categories = Array.from(new Set((await getCatalogFiles()).map((f) => f.category))).sort();
     } catch {
       categories = [];
     }
