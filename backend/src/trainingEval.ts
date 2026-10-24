@@ -44,6 +44,9 @@ interface Case {
   types?: DocType[]; // loại tài liệu cần đếm / liệt kê
   departments?: string[]; // [] = tất cả phòng ban
   code?: string; // "QA 0013" (phòng + số SOP), "QA 0013 F02" khi tra ngược
+  // Nhóm SOP khi câu hỏi ghi rõ ("FRM/FD/SOP-OPC/0001" → OPC): mỗi nhóm đánh số riêng, SOP-GEN 0001 và SOP-OPC 0001
+  // là hai SOP khác nhau. Không ghi nhóm ("sop fd 1") → mọi nhóm có số đó.
+  series?: string;
   outcome?: "hoi_lai" | "khong_co_phong" | "khong_tim_thay";
   history?: ChatMessage[];
   needsModel?: boolean; // từ khóa không đủ (sai chính tả, câu nối tiếp): bỏ qua khi --offline
@@ -221,7 +224,9 @@ function expectedKeys(c: Case, docs: RefDoc[]): string[] {
   const types = c.types ?? [];
   if (c.code) {
     const [department, number] = c.code.split(" ");
-    return docs.filter((d) => d.department === department && d.number === number && types.includes(d.type)).map((d) => d.key);
+    return docs
+      .filter((d) => d.department === department && d.number === number && (!c.series || d.series === c.series) && types.includes(d.type))
+      .map((d) => d.key);
   }
   const departments = c.departments ?? [];
   return docs
@@ -281,18 +286,26 @@ function allSopCases(docs: RefDoc[], categories: string[]): Case[] {
     const dl = D.toLowerCase();
     const n = String(Number(number));
     const code = `${D} ${number}`;
-    const styles = [`sop ${dl} ${n}`, `sop${dl}${n}`, `${D} sop ${number}`, `sop ${n} của ${dl}`, `FRM/${rawDepartment}/SOP-${series}/${number}`];
-    for (const s of styles) {
-      add({ q: `${s} có bao nhiêu biểu mẫu`, intent: "DEM", types: F, code });
-      add({ q: `có mấy f ${s}`, intent: "DEM", types: F, code });
-      add({ q: `các biểu mẫu của ${s}`, intent: "LIET_KE", types: F, code });
-      add({ q: `phụ lục của ${s}`, intent: "LIET_KE", types: A, code });
-      add({ q: `${s} gồm những gì`, intent: "LIET_KE", types: ["form", "appendix"], code });
-      add({ q: `${s} tên là gì`, intent: "THONG_TIN_TAI_LIEU", code });
+    // Cách viết không ghi nhóm → đáp án gồm mọi nhóm có số này; mã đầy đủ ghi nhóm → chỉ nhóm đó
+    const styles: [string, string | undefined][] = [
+      [`sop ${dl} ${n}`, undefined],
+      [`sop${dl}${n}`, undefined],
+      [`${D} sop ${number}`, undefined],
+      [`sop ${n} của ${dl}`, undefined],
+      [`FRM/${rawDepartment}/SOP-${series}/${number}`, series],
+    ];
+    for (const [s, only] of styles) {
+      const scope = { code, ...(only ? { series: only } : {}) };
+      add({ q: `${s} có bao nhiêu biểu mẫu`, intent: "DEM", types: F, ...scope });
+      add({ q: `có mấy f ${s}`, intent: "DEM", types: F, ...scope });
+      add({ q: `các biểu mẫu của ${s}`, intent: "LIET_KE", types: F, ...scope });
+      add({ q: `phụ lục của ${s}`, intent: "LIET_KE", types: A, ...scope });
+      add({ q: `${s} gồm những gì`, intent: "LIET_KE", types: ["form", "appendix"], ...scope });
+      add({ q: `${s} tên là gì`, intent: "THONG_TIN_TAI_LIEU", ...scope });
     }
-    for (const child of docs.filter((d) => d.department === D && d.number === number && d.type !== "sop")) {
+    for (const child of docs.filter((d) => d.department === D && d.number === number && d.series === series && d.type !== "sop")) {
       const noun = child.type === "form" ? "biểu mẫu" : "phụ lục";
-      add({ q: `${noun} FRM/${rawDepartment}/SOP-${series}/${number}-${child.sub} thuộc sop nào`, intent: "TRA_NGUOC", code: `${code} ${child.sub}` });
+      add({ q: `${noun} FRM/${rawDepartment}/SOP-${series}/${number}-${child.sub} thuộc sop nào`, intent: "TRA_NGUOC", code: `${code} ${child.sub}`, series });
     }
   }
   for (const D of categories.filter((c) => /^[A-Z]{2,3}$/.test(c))) {
@@ -367,7 +380,10 @@ function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: 
   if (c.intent === "TRA_NGUOC" || c.intent === "THONG_TIN_TAI_LIEU") {
     const [department, number] = c.code!.split(" ");
     // Cùng phòng, cùng số có thể có nhiều SOP khác nhóm (SOP-CAL 0003 và SOP-GEN 0003): nêu đúng một trong số đó là đạt
-    const parents = docs.filter((d) => d.department === department && d.number === number && d.type === "sop");
+    // (đúng nhóm nếu câu hỏi ghi rõ nhóm)
+    const parents = docs.filter(
+      (d) => d.department === department && d.number === number && (!c.series || d.series === c.series) && d.type === "sop"
+    );
     const mentioned = listedOrMentioned(output);
     const mentionsParent = parents.some((p) => mentioned.includes(p.key));
     if (!mentionsParent) problems.push(`không nêu SOP ${department} ${number}: ${output.slice(0, 150)}`);
@@ -414,7 +430,10 @@ function check(c: Case, route: RoutedQuery, reply: InventoryReply | null, docs: 
   if (wantsList && !printedList) problems.push("cần in danh sách nhưng không in");
   if (!wantsList && printedList) problems.push("câu chỉ hỏi số lượng nhưng bot in cả danh sách");
   if (wantsList && printedList) {
-    const missing = expected.filter((k) => !listed.includes(k));
+    // Danh sách dài bị cắt có chủ đích ("Mới hiển thị 300/432"): chỉ kiểm phần đã in và tổng số ghi trong ghi chú
+    const truncated = output.match(/Mới hiển thị (\d+)\/(\d+)/);
+    if (truncated && Number(truncated[2]) !== expected.length) problems.push(`ghi tổng ${truncated[2]}, kho có ${expected.length}`);
+    const missing = truncated ? [] : expected.filter((k) => !listed.includes(k));
     const extra = listed.filter((k) => !expected.includes(k));
     if (missing.length) problems.push(`thiếu: ${missing.join(", ")}`);
     if (extra.length) problems.push(`thừa: ${extra.join(", ")}`);
