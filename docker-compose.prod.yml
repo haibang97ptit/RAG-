@@ -43,6 +43,8 @@ services:
       TOP_K: "20"
       RERANK_TOP_K: "10"
       ENHANCED_RETRIEVAL: ${ENHANCED_RETRIEVAL:-false}
+      # Giới hạn token một lần gọi LLM trả lời (Groq gói miễn phí 8000); vượt thì tự cắt bớt. Nâng gói thì tăng.
+      LLM_TOKEN_LIMIT: ${LLM_TOKEN_LIMIT:-8000}
       # "SOP 0005" mà nhiều phòng ban trùng số → hiểu là của phòng ban này
       DEFAULT_CATEGORY: ${DEFAULT_CATEGORY:-QA}
       # Để trống = chưa bật auth cho /query* (giai đoạn app cũ chưa gửi token)

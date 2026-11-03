@@ -44,6 +44,7 @@ import { getUploads, saveUpload, uploadIdleMinutes, UPLOAD_MAX_BYTES, UPLOAD_MAX
 import { expiredUploadText, refersToFile, uploadReplyFor } from "./uploadAssistant.js";
 import { parseDocCodes } from "./docCode.js";
 import { newUsage, runWithUsage } from "./llmUsage.js";
+import { fitToTokenLimit, tooLargeRetryScale } from "./promptBudget.js";
 import { DIFF_LIST_HEADING, diffDocuments, diffSummaryForAi, renderDiffList } from "./docDiff.js";
 import { expandWithGlossary } from "./glossary.js";
 import { logFeedback, logInteraction } from "./interactionLog.js";
@@ -322,6 +323,9 @@ interface PreparedReply {
   list: { markdown: string; fallbackIntro: string } | null;
   // Câu trả lời dựng sẵn (hỏi lại, biểu mẫu của một SOP, tra ngược): trả thẳng, không gọi LLM
   fixedText?: string;
+  // Prompt có đoạn tài liệu: dựng lại với ít đoạn hơn khi vượt giới hạn token (promptBudget.ts)
+  shrinkPrompt?: (keep: number) => string;
+  chunkCount?: number;
 }
 
 /**
@@ -459,10 +463,28 @@ async function* streamPreparedAnswer(reply: PreparedReply, messages: ChatMessage
     return;
   }
   let wroteAny = false;
-  try {
-    for await (const delta of streamChatCompletion(reply.prompt, messages, reply.maxTokens)) {
+  // Cắt cho vừa giới hạn token trước khi gửi (scale < 1: gửi lại sau khi Groq báo quá lớn)
+  const run = async function* (scale: number) {
+    const fitted = fitToTokenLimit(
+      { prompt: reply.prompt, messages, maxTokens: reply.maxTokens, shrinkPrompt: reply.shrinkPrompt, chunkCount: reply.chunkCount },
+      config.llmTokenLimit,
+      scale
+    );
+    if (fitted.trimmed.length > 0) fastify.log.info({ trimmed: fitted.trimmed, scale }, "prompt_trimmed");
+    for await (const delta of streamChatCompletion(fitted.prompt, fitted.messages, fitted.maxTokens)) {
       wroteAny = true;
       yield delta;
+    }
+  };
+  try {
+    try {
+      yield* run(1);
+    } catch (err) {
+      // Ước lượng token lệch, Groq vẫn từ chối vì quá lớn: gửi lại một lần, thu nhỏ theo đúng tỉ lệ Groq báo
+      const scale = tooLargeRetryScale(err);
+      if (scale === null || wroteAny) throw err;
+      fastify.log.warn({ err: (err as Error).message, scale }, "prompt_too_large_retry");
+      yield* run(scale);
     }
   } catch (err) {
     if (!reply.list || wroteAny) throw err;
@@ -610,10 +632,21 @@ async function prepareAnswer(
   if (overlap) {
     return { intent, route, reply: { prompt: buildOverlapSystemPrompt(overlap), maxTokens: OVERLAP_MAX_ANSWER_TOKENS, list: null }, retrievedSources };
   }
-  const prompt = route.followUp
-    ? buildFollowUpSystemPrompt(reranked, catalog)
-    : buildSOPSystemPrompt(reranked, complexity === "complex", catalog);
-  return { intent, route, reply: { prompt, maxTokens: 2048, list: null }, retrievedSources };
+  // Đoạn xếp theo mức liên quan giảm dần: vượt giới hạn token thì bỏ bớt đoạn cuối (promptBudget.ts)
+  const buildPrompt = (chunks: typeof reranked) =>
+    route.followUp ? buildFollowUpSystemPrompt(chunks, catalog) : buildSOPSystemPrompt(chunks, complexity === "complex", catalog);
+  return {
+    intent,
+    route,
+    reply: {
+      prompt: buildPrompt(reranked),
+      maxTokens: 2048,
+      list: null,
+      chunkCount: reranked.length,
+      shrinkPrompt: (keep) => buildPrompt(reranked.slice(0, keep)),
+    },
+    retrievedSources,
+  };
 }
 
 /**

@@ -64,6 +64,9 @@ export const config = {
   ocrLang: process.env.OCR_LANG || "vie+eng",
   ocrDpi: parseInt(process.env.OCR_DPI || "300", 10),
   enhancedRetrieval: process.env.ENHANCED_RETRIEVAL === "true",
+  // Giới hạn token của MỘT lần gọi LLM trả lời (prompt + lịch sử + chỗ dành cho câu trả lời). Groq gói miễn phí:
+  // 8.000 token/phút. Vượt thì tự cắt bớt lịch sử / đoạn tài liệu trước khi gửi. Nâng gói thì tăng lên.
+  llmTokenLimit: parseInt(process.env.LLM_TOKEN_LIMIT || "8000", 10),
   // Tra cứu hồ sơ QualZen (Action Item, CCN, CAPA) - bật khi có đủ QUALZEN_DB_*
   qualzenEnabled: qualzenSettingsFromEnv() !== null,
   // Danh mục tài liệu (đếm, liệt kê, tra mã, phiên bản, ngày hiệu lực) lấy từ Docuzen - phần quản lý tài liệu
